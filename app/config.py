@@ -12,12 +12,6 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 LLMProvider = Literal["gemini", "groq"]
 
-# Used when LLM_MODEL is not set, so switching provider is a one-line change.
-DEFAULT_MODELS: dict[str, str] = {
-    "gemini": "gemini-2.5-flash",
-    "groq": "llama-3.3-70b-versatile",
-}
-
 
 class Settings(BaseSettings):
     """Typed view of the environment. Field names map to env vars case-insensitively."""
@@ -34,7 +28,9 @@ class Settings(BaseSettings):
 
     # LLM
     llm_provider: LLMProvider = "gemini"
-    llm_model: str | None = None
+    # Required, no default: provider model names get retired (gemini-2.5-flash now 404s),
+    # so a hard-coded fallback fails late and confusingly. Missing -> error at startup.
+    llm_model: str
     google_api_key: SecretStr | None = None
     groq_api_key: SecretStr | None = None
 
@@ -49,11 +45,6 @@ class Settings(BaseSettings):
 
     # UI -> API
     api_url: str = "http://localhost:8000"
-
-    @property
-    def resolved_llm_model(self) -> str:
-        """Return LLM_MODEL if set, else the default model for the chosen provider."""
-        return self.llm_model or DEFAULT_MODELS[self.llm_provider]
 
 
 @lru_cache

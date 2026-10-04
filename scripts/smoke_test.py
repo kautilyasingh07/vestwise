@@ -31,7 +31,7 @@ def check_mongo() -> bool:
 
 def check_llm() -> bool:
     """Send a trivial prompt to the configured LLM and print its reply."""
-    label = f"{settings.llm_provider}/{settings.resolved_llm_model}"
+    label = f"{settings.llm_provider}/{settings.llm_model}"
     try:
         reply = get_chat_model().invoke("Reply with OK")
         print(f"[llm] {label} replied: {reply.text.strip()!r}")

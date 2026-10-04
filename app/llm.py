@@ -22,7 +22,7 @@ def get_chat_model(temperature: float = 0.0) -> BaseChatModel:
 
     Temperature defaults to 0 so answers and tool choices are as repeatable as possible.
     """
-    model = settings.resolved_llm_model
+    model = settings.llm_model
 
     # Provider imports are local so only the chosen SDK is loaded.
     if settings.llm_provider == "gemini":

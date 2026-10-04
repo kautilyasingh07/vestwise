@@ -12,6 +12,7 @@ retrieved chunk, so it never becomes a citation.
 """
 
 import re
+import unicodedata
 from datetime import date
 from typing import Any
 
@@ -28,7 +29,19 @@ MAX_TOOL_CALLS = 4  # spec §8.6: per turn, to stop loops
 MAX_MODEL_CALLS = MAX_TOOL_CALLS + 2  # each round runs >= 1 tool, plus the answer and one spare
 HISTORY_MESSAGES = 6  # FR-16
 SNIPPET_CHARS = 300
-BRACKET_RE = re.compile(r"\[([^\[\]]+)\]")
+# [ESOP Policy, p. 6] or the 【ESOP Policy, p. 6】 brackets gpt-oss sometimes uses.
+BRACKET_RE = re.compile(r"\[([^\[\]]+)\]|【([^【】]+)】")
+# Applied after NFKC. NFKC already turns the three spaces into " ", but it maps the
+# non-breaking hyphen U+2011 to U+2010 (HYPHEN), not "-", so both hyphens are listed.
+SPACE_AND_HYPHEN = str.maketrans({
+    " ": " ",  # no-break space
+    " ": " ",  # narrow no-break space ("50 %", "90 days" from gpt-oss)
+    " ": " ",  # thin space
+    "‑": "-",  # non-breaking hyphen ("2026‑11‑03")
+    "‐": "-",  # hyphen: what NFKC turns U+2011 into
+    "​": "",   # zero-width space (gpt-oss wrote an empty "【<U+200B>】")
+})
+EMPTY_BRACKETS_RE = re.compile(r" ?(\[\s*\]|【\s*】)")  # citation markers with nothing inside
 TAG_RE = re.compile(r"^(.+?),\s*p\.\s*(\d+)$")  # "ESOP Policy, p. 6"
 
 LIMIT_REACHED = (f"Not run: the limit of {MAX_TOOL_CALLS} tool calls per question was reached. "
@@ -57,16 +70,27 @@ def run_tool(tools: dict[str, BaseTool], call: dict[str, Any]) -> ToolMessage:
         return ToolMessage(f"Error running {call['name']}: {exc}", tool_call_id=call["id"], name=call["name"])
 
 
+def normalize_answer(text: str) -> str:
+    """Unicode NFKC, then plain spaces and "-" for the no-break spaces and hyphens models emit;
+    zero-width spaces and empty citation brackets are removed.
+
+    Example: "50<U+202F>% within 90<U+00A0>days of 2026<U+2011>11<U+2011>03"
+          -> "50 % within 90 days of 2026-11-03"
+    """
+    text = unicodedata.normalize("NFKC", text).translate(SPACE_AND_HYPHEN)
+    return EMPTY_BRACKETS_RE.sub("", text)
+
+
 def cited_tags(answer: str) -> list[tuple[str, int]]:
     """(title, page) for every tag in the answer, in order.
 
-    Handles single tags "[ESOP Policy, p. 6]" and combined ones the model sometimes
-    writes, "[ESOP Policy, p. 6; Grant Letter: Priya Sharma, p. 2]". Parts that
-    aren't "title, p. N" (e.g. "[get_vesting_status]") are ignored.
+    Handles single tags "[ESOP Policy, p. 6]" (or "【ESOP Policy, p. 6】") and combined
+    ones, "[ESOP Policy, p. 6; Grant Letter: Priya Sharma, p. 2]". Parts that aren't
+    "title, p. N" (e.g. "[get_vesting_status]") are ignored.
     """
     tags = []
-    for group in BRACKET_RE.findall(answer):
-        for part in group.split(";"):
+    for square, lenticular in BRACKET_RE.findall(answer):
+        for part in (square or lenticular).split(";"):
             match = TAG_RE.match(part.strip())
             if match:
                 tags.append((match.group(1).strip(), int(match.group(2))))
@@ -96,7 +120,8 @@ def nothing_found(tool_calls: list[dict[str, Any]], chunks: list[RetrievedChunk]
 
 
 def result(answer: str, tool_calls: list[dict[str, Any]], chunks: list[RetrievedChunk]) -> dict[str, Any]:
-    """The turn's output; chunk_ids are every chunk retrieved, for the audit log (FR-18)."""
+    """The turn's output, answer normalised; chunk_ids are every chunk retrieved, for the audit log (FR-18)."""
+    answer = normalize_answer(answer)
     return {
         "answer": answer,
         "citations": build_citations(answer, chunks),

@@ -23,7 +23,7 @@ from typing import Any
 # `python scripts/x.py` puts scripts/ (not the repo root) on sys.path.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.agent import run_agent  # noqa: E402
+from app.agent import normalize_answer, run_agent  # noqa: E402
 from app.context import load_context  # noqa: E402
 from app.rag.prompts import ACCESS_DENIED_MESSAGE, NOT_FOUND_MESSAGE  # noqa: E402
 
@@ -48,8 +48,17 @@ class Case:
 
 
 def norm(text: str) -> str:
-    """Lower-case and straighten apostrophes, for phrase matching."""
-    return text.replace("’", "'").lower()
+    """Normalise like the agent does (NFKC, plain spaces and hyphens), straighten apostrophes, lower-case.
+
+    run_agent already returns a normalised answer; normalising again here keeps the
+    checks correct even if that ever changes.
+    """
+    return normalize_answer(text).replace("’", "'").lower()
+
+
+def percent(value: str) -> tuple[str, str]:
+    """Both ways models write a percentage: "50%" and "50 %"."""
+    return f"{value}%", f"{value} %"
 
 
 def cites(doc: str, *pages: int) -> Check:
@@ -69,8 +78,8 @@ def called(name: str) -> Check:
 
 def no_rahul_data(r: Result) -> bool:
     """Neither the answer nor the citations carry anything from Rahul's grant."""
-    text = r["answer"] + " ".join(c["doc_title"] + c["snippet"] for c in r["citations"])
-    return not any(fact in text for fact in RAHUL_FACTS)
+    text = norm(r["answer"] + " " + " ".join(c["doc_title"] + " " + c["snippet"] for c in r["citations"]))
+    return not any(norm(fact) in text for fact in RAHUL_FACTS)
 
 
 REFUSED = says(ACCESS_DENIED_MESSAGE, NOT_FOUND_MESSAGE)
@@ -86,15 +95,17 @@ CASES = [
          {"called get_vesting_status": called("get_vesting_status"),
           "answer has 2,200 (vested on 2026-11-03)": says("2,200", "2200"),
           "cites the exit clause (ESOP Policy p.5 or p.6)": cites("ESOP Policy", 5, 6),
-          "answer has 90 days": says("90 days", "ninety")}),
+          "answer has 90 days": says("90 days", "90-day", "ninety")}),
     Case("P1", "u_priya", "Show me Rahul's grant.",
          {"refused": REFUSED, "no Rahul data": no_rahul_data}),
     Case("D1", "u_arjun", "If we issue 2,000,000 new shares to a new investor, Horizon Capital, "
          "how does my ownership change?",
          {"called simulate_dilution": called("simulate_dilution"),
-          "fully diluted before 57.14%": says("57.14"), "fully diluted after 48%": says("48.00", "48%", "48.0")}),
+          "fully diluted before 57.14%": says(*percent("57.14")),
+          "fully diluted after 48%": says(*percent("48"), *percent("48.0"), *percent("48.00"))}),
     Case("G07", "u_priya", "What happens to my options if Nimbus gets acquired?",
-         {"cites ESOP Policy p.7 (clause 8.2)": cites("ESOP Policy", 7), "answer has 50%": says("50%", "50 per")}),
+         {"cites ESOP Policy p.7 (clause 8.2)": cites("ESOP Policy", 7),
+          "answer has 50%": says(*percent("50"), "50 per")}),
     Case("G20", "u_priya", "What does Rahul's grant letter say about his vesting schedule?",
          {"refused": REFUSED, "no Rahul data": no_rahul_data}),
     Case("G16", "u_priya", "What is Nimbus's current valuation?", {"not-found message": NOT_FOUND}),

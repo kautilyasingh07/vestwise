@@ -133,6 +133,40 @@ def test_cited_tags(answer: str, tags: list[tuple[str, int]]) -> None:
     assert agent.cited_tags(answer) == tags
 
 
+def test_lenticular_brackets_are_citations() -> None:
+    answer = "lapse 【ESOP Policy, p. 6】 and 90 days 【ESOP Policy, p. 5; Grant Letter: Priya Sharma, p. 2】"
+    assert agent.cited_tags(answer) == [("ESOP Policy", 6), ("ESOP Policy", 5), ("Grant Letter: Priya Sharma", 2)]
+
+
+# --- answer normalisation (gpt-oss on Groq emits these characters) ---
+
+@pytest.mark.parametrize(("raw", "clean"), [
+    ("50 %", "50 %"),                           # narrow no-break space
+    ("90 days", "90 days"),                     # no-break space
+    ("2026‑11‑03", "2026-11-03"),          # non-breaking hyphen
+    ("1 000 options", "1 000 options"),         # thin space
+    ("2026‐11‐03", "2026-11-03"),          # plain HYPHEN, what NFKC makes of U+2011
+    ("５０％", "50%"),                   # full-width digits and % (NFKC)
+    ("[ESOP Policy, p. 7]", "[ESOP Policy, p. 7]"),
+    ("as of that date 【​】.", "as of that date."),  # empty marker seen in run 5
+    ("keep [ ] these", "keep these"),
+    ("zero​width", "zerowidth"),
+    ("plain ascii, unchanged", "plain ascii, unchanged"),
+])
+def test_normalize_answer(raw: str, clean: str) -> None:
+    assert agent.normalize_answer(raw) == clean
+
+
+def test_returned_answer_is_normalised_and_its_citation_parsed(use_model) -> None:
+    use_model([
+        AIMessage(content="", tool_calls=[call("search_policy", {"query": "exercise window"}, "1")]),
+        AIMessage(content="Within 90 days 【ESOP Policy, p. 5】."),
+    ], chunks=[P5])
+    out = agent.run_agent(PRIYA, "exercise window?", as_of=AS_OF)
+    assert out["answer"] == "Within 90 days 【ESOP Policy, p. 5】."
+    assert [(c["doc_title"], c["page"]) for c in out["citations"]] == [("ESOP Policy", 5)]
+
+
 def test_invented_citation_is_dropped() -> None:
     cites = agent.build_citations("[ESOP Policy, p. 5] and [ESOP Policy, p. 9]", [P5])
     assert [(c["doc_title"], c["page"]) for c in cites] == [("ESOP Policy", 5)]
