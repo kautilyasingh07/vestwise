@@ -5,6 +5,10 @@ Run from the repo root:  python scripts/ingest_all.py
 Only the top level of data/docs/ is ingested; data/docs/compliance/ holds
 draft letters for the compliance checker (Phase 9), which must not become
 searchable policy. Idempotent: running it twice leaves the same chunk count.
+
+Grant letters are personal: each is ingested with its owner's stakeholder id
+(checked against the seeded `stakeholders` collection); everything else is
+company-wide (owner None).
 """
 
 import sys
@@ -28,6 +32,22 @@ DOC_TYPES: dict[str, DocType] = {
 }
 
 
+# Personal documents -> owner stakeholder _id (data/seed.json). A grant letter missing
+# from this map is refused by ingest_file rather than ingested as company-wide.
+DOCUMENT_OWNERS: dict[str, str] = {
+    "grant_letter_priya.pdf": "sh_priya",
+    "grant_letter_rahul.pdf": "sh_rahul",
+}
+
+
+def check_owners_exist(company_id: str) -> None:
+    """Raise if any DOCUMENT_OWNERS stakeholder is not seeded for this company."""
+    seeded = {s["_id"] for s in db.stakeholders().find({"company_id": company_id}, {"_id": 1})}
+    missing = set(DOCUMENT_OWNERS.values()) - seeded
+    if missing:
+        raise ValueError(f"owner stakeholders not in seed data for '{company_id}': {sorted(missing)}")
+
+
 def doc_type_for(path: Path) -> DocType:
     """Infer doc_type from the file name; raise if no prefix matches."""
     for prefix, doc_type in DOC_TYPES.items():
@@ -46,10 +66,13 @@ def main() -> int:
     if not pdfs:
         print(f"No PDFs in {DOCS_DIR}; run scripts/build_pdfs.py first.")
         return 1
+    check_owners_exist(COMPANY_ID)
     for path in pdfs:
-        result = ingest_file(path, COMPANY_ID, doc_type_for(path), pdf_title(path))
+        owner = DOCUMENT_OWNERS.get(path.name)
+        result = ingest_file(path, COMPANY_ID, doc_type_for(path), pdf_title(path), owner)
         print(f"{path.name}: {result.chunks} chunks from {result.pages} page(s), "
-              f"replaced {result.replaced_chunks} (doc_id {result.doc_id})")
+              f"replaced {result.replaced_chunks}, owner {result.owner_stakeholder_id or 'company-wide'} "
+              f"(doc_id {result.doc_id})")
     total = db.chunks().count_documents({"company_id": COMPANY_ID})
     docs = db.documents().count_documents({"company_id": COMPANY_ID})
     print(f"total: {docs} documents, {total} chunks for company '{COMPANY_ID}'")

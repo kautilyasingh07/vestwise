@@ -3,6 +3,11 @@
 Idempotent (FR-5): the document id is derived from the company and the file's
 SHA-256, so re-ingesting the same bytes deletes that document's old chunks
 and writes the same ids again instead of adding duplicates.
+
+Document-level access: every document and chunk carries `owner_stakeholder_id`,
+None for company-wide documents (policy, board resolution) and the employee's
+stakeholder id for personal ones (grant letters). The retriever filters on it
+(app/rag/access.py), so employees never retrieve another employee's letter.
 """
 
 import hashlib
@@ -18,6 +23,9 @@ from app.ingest.loader import load_pdf
 
 DocType = Literal["policy", "grant_letter", "board_resolution"]
 
+# Doc types that belong to one stakeholder; ingesting one without an owner would make it company-wide.
+PERSONAL_DOC_TYPES: frozenset[str] = frozenset({"grant_letter"})
+
 HASH_PREFIX_LEN = 12  # hex chars of the SHA-256 used in ids (48 bits: no collisions at this scale)
 READ_BLOCK = 1 << 16
 
@@ -28,6 +36,7 @@ class IngestResult:
 
     doc_id: str
     title: str
+    owner_stakeholder_id: str | None
     pages: int
     chunks: int
     replaced_chunks: int
@@ -47,14 +56,27 @@ def make_doc_id(company_id: str, sha256: str) -> str:
     return f"{company_id}_{sha256[:HASH_PREFIX_LEN]}"
 
 
+def check_owner(doc_type: DocType, owner_stakeholder_id: str | None) -> None:
+    """Fail closed: a personal document (grant letter) must name its owner."""
+    if doc_type in PERSONAL_DOC_TYPES and not owner_stakeholder_id:
+        raise ValueError(f"{doc_type} documents need an owner_stakeholder_id; without one every employee could read it")
+
+
 def chunk_records(
-    chunks: list[Chunk], vectors: list[list[float]], doc_id: str, company_id: str, title: str, doc_type: DocType
+    chunks: list[Chunk],
+    vectors: list[list[float]],
+    doc_id: str,
+    company_id: str,
+    title: str,
+    doc_type: DocType,
+    owner_stakeholder_id: str | None = None,
 ) -> list[dict[str, Any]]:
     """Build the Mongo `chunks` documents (spec §7 + FR-3 metadata). Pure: no I/O."""
     return [
         {
             "_id": f"{doc_id}_{i:03d}",
             "company_id": company_id,
+            "owner_stakeholder_id": owner_stakeholder_id,
             "doc_id": doc_id,
             "doc_title": title,
             "doc_type": doc_type,
@@ -68,19 +90,23 @@ def chunk_records(
     ]
 
 
-def ingest_file(path: Path, company_id: str, doc_type: DocType, title: str) -> IngestResult:
+def ingest_file(
+    path: Path, company_id: str, doc_type: DocType, title: str, owner_stakeholder_id: str | None = None
+) -> IngestResult:
     """Load, chunk, embed and store one PDF; replace any earlier ingestion of the same file.
 
-    All slow work (parsing, embedding) happens before the first write, so a
-    failure there leaves the database untouched. The writes themselves are not
+    owner_stakeholder_id is None for company-wide documents and required for
+    grant letters. All slow work (parsing, embedding) happens before the first
+    write, so a failure there leaves the database untouched. The writes are not
     a transaction; if a run dies mid-write, running it again repairs the state.
     """
+    check_owner(doc_type, owner_stakeholder_id)
     sha256 = file_hash(path)
     doc_id = make_doc_id(company_id, sha256)
     pages = load_pdf(path)
     chunks = chunk_document(pages, title)
     vectors = embed([c.embed_text for c in chunks])
-    records = chunk_records(chunks, vectors, doc_id, company_id, title, doc_type)
+    records = chunk_records(chunks, vectors, doc_id, company_id, title, doc_type, owner_stakeholder_id)
 
     replaced = db.chunks().delete_many({"company_id": company_id, "doc_id": doc_id}).deleted_count
     db.documents().replace_one(
@@ -88,6 +114,7 @@ def ingest_file(path: Path, company_id: str, doc_type: DocType, title: str) -> I
         {
             "_id": doc_id,
             "company_id": company_id,
+            "owner_stakeholder_id": owner_stakeholder_id,
             "title": title,
             "doc_type": doc_type,
             "file_hash": sha256,
@@ -99,4 +126,11 @@ def ingest_file(path: Path, company_id: str, doc_type: DocType, title: str) -> I
     )
     if records:
         db.chunks().insert_many(records)
-    return IngestResult(doc_id=doc_id, title=title, pages=len(pages), chunks=len(records), replaced_chunks=replaced)
+    return IngestResult(
+        doc_id=doc_id,
+        title=title,
+        owner_stakeholder_id=owner_stakeholder_id,
+        pages=len(pages),
+        chunks=len(records),
+        replaced_chunks=replaced,
+    )

@@ -1,10 +1,14 @@
-"""Create the Atlas Vector Search index on `chunks` (spec §7, FR-4).
+"""Create or update the Atlas Vector Search index on `chunks` (spec §7, FR-4).
 
 Run from the repo root:  python scripts/create_vector_index.py
 
-Uses pymongo's search index API, then waits until Atlas reports the index
-READY. If the API is refused (e.g. on a cluster tier that doesn't allow it),
-prints the index JSON and the steps to create it in the Atlas UI instead.
+Uses pymongo's search index API. A missing index is created; an index with a
+different definition (e.g. without the owner_stakeholder_id filter field) is
+updated in place. It then waits until Atlas reports READY *and* a probe
+`$vectorSearch` using the real access filter succeeds, because right after an
+update the status can still read READY for the old definition.
+If the API is refused (e.g. on a cluster tier that doesn't allow it), prints
+the index JSON and the steps to create it in the Atlas UI instead.
 Safe to re-run: an existing index with the same definition is left alone.
 """
 
@@ -23,16 +27,22 @@ from pymongo.operations import SearchIndexModel  # noqa: E402
 
 from app import db  # noqa: E402
 from app.config import settings  # noqa: E402
+from app.rag.access import build_access_filter  # noqa: E402
 
 EMBEDDING_DIMS = 384  # all-MiniLM-L6-v2
 
-# Spec §7 index definition: cosine similarity on `embedding`, pre-filter on `company_id`.
+# Spec §7 index definition: cosine similarity on `embedding`; pre-filter fields
+# `company_id` (tenant) and `owner_stakeholder_id` (personal documents).
 INDEX_DEFINITION: dict[str, Any] = {
     "fields": [
         {"type": "vector", "path": "embedding", "numDimensions": EMBEDDING_DIMS, "similarity": "cosine"},
         {"type": "filter", "path": "company_id"},
+        {"type": "filter", "path": "owner_stakeholder_id"},
     ]
 }
+
+# Matches no documents; only checks that Atlas accepts the employee filter shape.
+PROBE_FILTER = build_access_filter("__probe__", "employee", "__probe__")
 
 POLL_SECONDS = 5
 TIMEOUT_SECONDS = 300
@@ -56,16 +66,45 @@ def ensure_index(collection: Collection, name: str) -> str:
     return "already exists"
 
 
+def probe_error(collection: Collection, name: str) -> str | None:
+    """Run a $vectorSearch with the employee access filter; return the error text, or None if it works.
+
+    Fails with "needs to be indexed as filter" until the new definition is live.
+    """
+    probe = {
+        "$vectorSearch": {
+            "index": name,
+            "path": "embedding",
+            "queryVector": [0.0] * (EMBEDDING_DIMS - 1) + [1.0],
+            "numCandidates": 1,
+            "limit": 1,
+            "filter": PROBE_FILTER,
+        }
+    }
+    try:
+        list(collection.aggregate([probe]))
+    except OperationFailure as exc:
+        return str(exc.details.get("errmsg", exc) if exc.details else exc)
+    return None
+
+
 def wait_until_ready(collection: Collection, name: str) -> str:
-    """Poll until the index is READY and queryable (or FAILED / timed out); return the last status."""
+    """Poll until the index is READY, queryable, on our definition, and the probe query works.
+
+    Returns the last status ("READY", "FAILED", or whatever it was at the timeout).
+    """
     deadline = time.monotonic() + TIMEOUT_SECONDS
     status = "UNKNOWN"
     while time.monotonic() < deadline:
         index = find_index(collection, name) or {}
         status = index.get("status", "UNKNOWN")
-        print(f"  status: {status}, queryable: {index.get('queryable', False)}")
-        if (status == "READY" and index.get("queryable")) or status == "FAILED":
+        if status == "FAILED":
             return status
+        ready = status == "READY" and index.get("queryable") and index.get("latestDefinition") == INDEX_DEFINITION
+        error = probe_error(collection, name) if ready else "index not ready"
+        print(f"  status: {status}, queryable: {index.get('queryable', False)}, probe: {error or 'ok'}")
+        if error is None:
+            return "READY"
         time.sleep(POLL_SECONDS)
     return status
 
