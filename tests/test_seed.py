@@ -6,19 +6,9 @@ Pool accounting terms used throughout:
 - fully diluted total = holdings + outstanding + unallocated
 """
 
-import json
-from pathlib import Path
 from typing import Any
 
-import pytest
-
-SEED_PATH = Path(__file__).resolve().parent.parent / "data" / "seed.json"
-
-
-@pytest.fixture(scope="module")
-def seed() -> dict[str, Any]:
-    """The parsed seed file."""
-    return json.loads(SEED_PATH.read_text(encoding="utf-8"))
+# The `seed` fixture lives in conftest.py.
 
 
 def stakeholder_ids(seed: dict[str, Any]) -> set[str]:
