@@ -1,0 +1,24 @@
+# Secrets
+.env
+
+# Virtual environments
+venv/
+.venv/
+
+# Python build/test artefacts
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Local-only notes and working rules
+learning/
+CLAUDE.md
+PROJECT_STATUS.md
+
+# OS
+.DS_Store
+
+# Fallback local vector store (spec §14)
+chroma_data/
+
+.claude/

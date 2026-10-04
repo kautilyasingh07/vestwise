@@ -1,0 +1,33 @@
+# API
+fastapi
+uvicorn[standard]
+pydantic
+pydantic-settings
+python-dotenv
+
+# Database
+pymongo
+
+# LLM / agent
+langchain
+langchain-core
+langchain-google-genai
+langchain-groq
+
+# Ingestion
+sentence-transformers
+pypdf
+
+# UI
+streamlit
+requests
+
+# Domain logic
+python-dateutil
+
+# Tests
+pytest
+httpx
+
+# Synthetic PDF generation
+reportlab
