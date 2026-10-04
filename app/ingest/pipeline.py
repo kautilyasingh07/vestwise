@@ -1,0 +1,102 @@
+"""Ingest one PDF into `documents` and `chunks` (spec FR-1..FR-5, §7).
+
+Idempotent (FR-5): the document id is derived from the company and the file's
+SHA-256, so re-ingesting the same bytes deletes that document's old chunks
+and writes the same ids again instead of adding duplicates.
+"""
+
+import hashlib
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any, Literal
+
+from app import db
+from app.ingest.chunker import Chunk, chunk_document
+from app.ingest.embedder import embed
+from app.ingest.loader import load_pdf
+
+DocType = Literal["policy", "grant_letter", "board_resolution"]
+
+HASH_PREFIX_LEN = 12  # hex chars of the SHA-256 used in ids (48 bits: no collisions at this scale)
+READ_BLOCK = 1 << 16
+
+
+@dataclass(frozen=True)
+class IngestResult:
+    """What ingest_file wrote, for logging."""
+
+    doc_id: str
+    title: str
+    pages: int
+    chunks: int
+    replaced_chunks: int
+
+
+def file_hash(path: Path) -> str:
+    """SHA-256 of the file's bytes, as hex. Same bytes -> same hash, whatever the file name."""
+    digest = hashlib.sha256()
+    with path.open("rb") as f:
+        while block := f.read(READ_BLOCK):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def make_doc_id(company_id: str, sha256: str) -> str:
+    """Deterministic document id: '<company_id>_<first 12 hex chars of the hash>'."""
+    return f"{company_id}_{sha256[:HASH_PREFIX_LEN]}"
+
+
+def chunk_records(
+    chunks: list[Chunk], vectors: list[list[float]], doc_id: str, company_id: str, title: str, doc_type: DocType
+) -> list[dict[str, Any]]:
+    """Build the Mongo `chunks` documents (spec §7 + FR-3 metadata). Pure: no I/O."""
+    return [
+        {
+            "_id": f"{doc_id}_{i:03d}",
+            "company_id": company_id,
+            "doc_id": doc_id,
+            "doc_title": title,
+            "doc_type": doc_type,
+            "page": chunk.page,
+            "section": chunk.section,
+            "chunk_index": i,
+            "text": chunk.text,
+            "embedding": vector,
+        }
+        for i, (chunk, vector) in enumerate(zip(chunks, vectors, strict=True))
+    ]
+
+
+def ingest_file(path: Path, company_id: str, doc_type: DocType, title: str) -> IngestResult:
+    """Load, chunk, embed and store one PDF; replace any earlier ingestion of the same file.
+
+    All slow work (parsing, embedding) happens before the first write, so a
+    failure there leaves the database untouched. The writes themselves are not
+    a transaction; if a run dies mid-write, running it again repairs the state.
+    """
+    sha256 = file_hash(path)
+    doc_id = make_doc_id(company_id, sha256)
+    pages = load_pdf(path)
+    chunks = chunk_document(pages, title)
+    vectors = embed([c.embed_text for c in chunks])
+    records = chunk_records(chunks, vectors, doc_id, company_id, title, doc_type)
+
+    replaced = db.chunks().delete_many({"company_id": company_id, "doc_id": doc_id}).deleted_count
+    db.documents().replace_one(
+        {"company_id": company_id, "file_hash": sha256},
+        {
+            "_id": doc_id,
+            "company_id": company_id,
+            "title": title,
+            "doc_type": doc_type,
+            "file_hash": sha256,
+            "filename": path.name,
+            "pages": len(pages),
+            "ingested_at": datetime.now(UTC),
+        },
+        upsert=True,
+    )
+    if records:
+        db.chunks().insert_many(records)
+    return IngestResult(doc_id=doc_id, title=title, pages=len(pages), chunks=len(records), replaced_chunks=replaced)

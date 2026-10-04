@@ -17,6 +17,7 @@ langchain-groq
 # Ingestion
 sentence-transformers
 pypdf
+langchain-text-splitters
 
 # UI
 streamlit

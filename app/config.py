@@ -40,6 +40,7 @@ class Settings(BaseSettings):
 
     # Embeddings and retrieval (spec §8.2)
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
+    vector_index_name: str = "chunks_vector_index"  # Atlas Vector Search index on chunks.embedding
     retrieval_top_k: int = 5
     retrieval_min_score: float = 0.35
 
