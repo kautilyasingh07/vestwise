@@ -1,0 +1,47 @@
+{
+  "company": {
+    "_id": "nimbus",
+    "name": "Nimbus Robotics Pvt Ltd",
+    "total_authorized_shares": 15000000,
+    "esop_pool_size": 1000000
+  },
+  "users": [
+    {"_id": "u_arjun", "company_id": "nimbus", "name": "Arjun Mehta", "role": "admin", "stakeholder_id": "sh_arjun"},
+    {"_id": "u_priya", "company_id": "nimbus", "name": "Priya Sharma", "role": "employee", "stakeholder_id": "sh_priya"},
+    {"_id": "u_rahul", "company_id": "nimbus", "name": "Rahul Verma", "role": "employee", "stakeholder_id": "sh_rahul"}
+  ],
+  "stakeholders": [
+    {"_id": "sh_arjun", "company_id": "nimbus", "name": "Arjun Mehta", "type": "founder"},
+    {"_id": "sh_meera", "company_id": "nimbus", "name": "Meera Iyer", "type": "founder"},
+    {"_id": "sh_seedcap", "company_id": "nimbus", "name": "Seedcap Ventures", "type": "investor"},
+    {"_id": "sh_priya", "company_id": "nimbus", "name": "Priya Sharma", "type": "employee"},
+    {"_id": "sh_rahul", "company_id": "nimbus", "name": "Rahul Verma", "type": "employee"},
+    {"_id": "sh_kiran", "company_id": "nimbus", "name": "Kiran Rao", "type": "employee"}
+  ],
+  "holdings": [
+    {"_id": "h_arjun_equity", "company_id": "nimbus", "stakeholder_id": "sh_arjun", "share_class": "equity", "shares": 6000000},
+    {"_id": "h_meera_equity", "company_id": "nimbus", "stakeholder_id": "sh_meera", "share_class": "equity", "shares": 2000000},
+    {"_id": "h_seedcap_preference", "company_id": "nimbus", "stakeholder_id": "sh_seedcap", "share_class": "preference", "shares": 1500000},
+    {"_id": "h_kiran_equity", "company_id": "nimbus", "stakeholder_id": "sh_kiran", "share_class": "equity", "shares": 600}
+  ],
+  "grants": [
+    {
+      "_id": "g_priya_2025", "company_id": "nimbus", "stakeholder_id": "sh_priya",
+      "grant_date": "2025-01-01", "options": 4800, "strike_price": 10,
+      "vesting": {"cliff_months": 12, "total_months": 48, "frequency": "monthly"},
+      "exercised": 0, "lapsed": 0, "status": "active", "termination_date": null
+    },
+    {
+      "_id": "g_rahul_2026", "company_id": "nimbus", "stakeholder_id": "sh_rahul",
+      "grant_date": "2026-03-15", "options": 2400, "strike_price": 12,
+      "vesting": {"cliff_months": 12, "total_months": 48, "frequency": "monthly"},
+      "exercised": 0, "lapsed": 0, "status": "active", "termination_date": null
+    },
+    {
+      "_id": "g_kiran_2023", "company_id": "nimbus", "stakeholder_id": "sh_kiran",
+      "grant_date": "2023-06-01", "options": 3600, "strike_price": 8,
+      "vesting": {"cliff_months": 12, "total_months": 48, "frequency": "monthly"},
+      "exercised": 600, "lapsed": 750, "status": "terminated", "termination_date": "2026-08-31"
+    }
+  ]
+}
