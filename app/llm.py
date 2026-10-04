@@ -9,6 +9,11 @@ from pydantic import SecretStr
 
 from app.config import settings
 
+# Fixed for every provider: demo and eval runs should be as repeatable as possible.
+# Not a parameter, so no caller can quietly raise it. Note: ChatGroq sends 0 as 1e-8
+# (Groq's API special-cases exactly 0); that's still effectively greedy decoding.
+TEMPERATURE = 0.0
+
 
 def _require_key(key: SecretStr | None, env_name: str) -> SecretStr:
     """Return the key or raise a clear error naming the missing variable."""
@@ -17,10 +22,11 @@ def _require_key(key: SecretStr | None, env_name: str) -> SecretStr:
     return key
 
 
-def get_chat_model(temperature: float = 0.0) -> BaseChatModel:
-    """Build the chat model selected by LLM_PROVIDER.
+def get_chat_model() -> BaseChatModel:
+    """Build the chat model selected by LLM_PROVIDER and LLM_MODEL, at TEMPERATURE (0).
 
-    Temperature defaults to 0 so answers and tool choices are as repeatable as possible.
+    Temperature 0 makes tool choices and wording as repeatable as possible; it does
+    not guarantee identical output (see learning/phase-06-api.md).
     """
     model = settings.llm_model
 
@@ -31,7 +37,7 @@ def get_chat_model(temperature: float = 0.0) -> BaseChatModel:
         return ChatGoogleGenerativeAI(
             model=model,
             google_api_key=_require_key(settings.google_api_key, "GOOGLE_API_KEY"),
-            temperature=temperature,
+            temperature=TEMPERATURE,
         )
 
     if settings.llm_provider == "groq":
@@ -40,7 +46,7 @@ def get_chat_model(temperature: float = 0.0) -> BaseChatModel:
         return ChatGroq(
             model=model,
             api_key=_require_key(settings.groq_api_key, "GROQ_API_KEY"),
-            temperature=temperature,
+            temperature=TEMPERATURE,
         )
 
     raise ValueError(f"Unsupported LLM_PROVIDER: {settings.llm_provider}")

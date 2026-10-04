@@ -4,6 +4,7 @@ uvicorn[standard]
 pydantic
 pydantic-settings
 python-dotenv
+python-multipart  # FastAPI needs it for UploadFile / Form (POST /documents, spec §9)
 
 # Database
 pymongo
