@@ -49,7 +49,9 @@ SPACE_AND_HYPHEN = str.maketrans({
 EMPTY_BRACKETS_RE = re.compile(r" ?(\[\s*\]|【\s*】)")  # citation markers with nothing inside
 LENTICULAR_RE = re.compile(r"【([^【】]*)】")  # gpt-oss's 【...】 -> [...]
 SQUARE_RE = re.compile(r"(\s?)\[([^\[\]]+)\]")  # a [...] group and the space before it
-TAG_RE = re.compile(r"^(.+?),\s*p\.\s*(\d+)$")  # "ESOP Policy, p. 6"
+TAG_RE = re.compile(r"^(.+?),\s*pp?\.\s*(\d+(?:\s*,\s*\d+)*)$")  # "ESOP Policy, p. 6" or merged "ESOP Policy, p. 5, 6"
+# One single-document tag (no ";"), for merging adjacent tags: [ESOP Policy, p. 5][ESOP Policy, p. 6].
+SINGLE_TAG_RE = re.compile(r"\[([^\[\];]+?),\s*pp?\.\s*(\d+(?:\s*,\s*\d+)*)\]")
 
 FLAG_CITATION_RETRIED = "citation_retried"  # the first draft cited an unretrieved page; a corrective retry ran
 FLAG_CITATION_INVALID = "citation_invalid"  # still invalid after the retry; the invalid tags were stripped
@@ -92,20 +94,64 @@ def normalize_answer(text: str) -> str:
     return LENTICULAR_RE.sub(r"[\1]", text)
 
 
-def cited_tags(answer: str) -> list[tuple[str, int]]:
-    """(title, page) for every tag in the answer, in order.
+def parse_tag(part: str) -> tuple[str, list[int]] | None:
+    """"ESOP Policy, p. 5, 6" -> ("ESOP Policy", [5, 6]); None if it isn't a citation tag."""
+    match = TAG_RE.match(part.strip())
+    if not match:
+        return None
+    return match.group(1).strip(), [int(p) for p in re.findall(r"\d+", match.group(2))]
 
-    Handles single tags "[ESOP Policy, p. 6]" (or "【ESOP Policy, p. 6】") and combined
-    ones, "[ESOP Policy, p. 6; Grant Letter: Priya Sharma, p. 2]". Parts that aren't
+
+def format_tag(title: str, pages: list[int]) -> str:
+    """("ESOP Policy", [5, 6]) -> "ESOP Policy, p. 5, 6" (bracket contents)."""
+    return f"{title}, p. {', '.join(str(p) for p in pages)}"
+
+
+def cited_tags(answer: str) -> list[tuple[str, int]]:
+    """(title, page) for every page cited in the answer, in order.
+
+    Handles single tags "[ESOP Policy, p. 6]" (or "【ESOP Policy, p. 6】"), merged ones
+    "[ESOP Policy, p. 5, 6]" (one entry per page) and combined ones
+    "[ESOP Policy, p. 6; Grant Letter: Priya Sharma, p. 2]". Parts that aren't
     "title, p. N" (e.g. "[get_vesting_status]") are ignored.
     """
     tags = []
     for square, lenticular in BRACKET_RE.findall(answer):
         for part in (square or lenticular).split(";"):
-            match = TAG_RE.match(part.strip())
-            if match:
-                tags.append((match.group(1).strip(), int(match.group(2))))
+            parsed = parse_tag(part)
+            if parsed:
+                tags.extend((parsed[0], page) for page in parsed[1])
     return tags
+
+
+def merge_adjacent_citations(answer: str) -> str:
+    """Merge adjacent tags for the same document into one, pages ascending and deduplicated.
+
+    "[ESOP Policy, p. 5][ESOP Policy, p. 6]" -> "[ESOP Policy, p. 5, 6]"; tags separated only by
+    whitespace count as adjacent; different documents or tags separated by text are left alone.
+    """
+    out: list[str] = []
+    pos = 0
+    group: tuple[str, list[int], int, int] | None = None  # title, pages, start, end
+
+    def flush() -> None:
+        nonlocal pos
+        if group is not None:
+            out.append(answer[pos:group[2]])
+            out.append(f"[{format_tag(group[0], sorted(group[1]))}]")
+            pos = group[3]
+
+    for match in SINGLE_TAG_RE.finditer(answer):
+        title = match.group(1).strip()
+        pages = [int(p) for p in re.findall(r"\d+", match.group(2))]
+        if group and group[0] == title and not answer[group[3]:match.start()].strip():
+            group = (title, group[1] + [p for p in pages if p not in group[1]], group[2], match.end())
+        else:
+            flush()
+            group = (title, list(dict.fromkeys(pages)), match.start(), match.end())
+    flush()
+    out.append(answer[pos:])
+    return "".join(out)
 
 
 def build_citations(answer: str, chunks: list[RetrievedChunk]) -> list[dict[str, Any]]:
@@ -136,20 +182,26 @@ def invalid_tags(answer: str, valid: set[tuple[str, int]]) -> list[tuple[str, in
 
 
 def strip_citations(answer: str, invalid: set[tuple[str, int]]) -> str:
-    """Remove invalid tags from the (normalised, square-bracket) answer; keep valid tags and other brackets.
+    """Remove invalid pages from the (normalised, square-bracket) answer; keep valid ones and other brackets.
 
-    "[ESOP Policy, p. 6; ESOP Policy, p. 7]" with p. 7 invalid -> "[ESOP Policy, p. 6]";
-    " [ESOP Policy, p. 7]" alone -> "" (with its leading space).
+    "[ESOP Policy, p. 6; ESOP Policy, p. 7]" or "[ESOP Policy, p. 6, 7]" with p. 7 invalid
+    -> "[ESOP Policy, p. 6]"; " [ESOP Policy, p. 7]" alone -> "" (with its leading space).
     """
-    def keep(part: str) -> bool:
-        match = TAG_RE.match(part.strip())
-        return not match or (match.group(1).strip(), int(match.group(2))) not in invalid
+    def filtered(part: str) -> str | None:
+        parsed = parse_tag(part)
+        if parsed is None:
+            return part  # not a citation, e.g. [get_vesting_status]
+        title, pages = parsed
+        kept = [p for p in pages if (title, p) not in invalid]
+        if not kept:
+            return None
+        return part if kept == pages else format_tag(title, kept)
 
     def rewrite(match: re.Match[str]) -> str:
         space, inner = match.group(1), match.group(2)
         parts = [p.strip() for p in inner.split(";")]
-        kept = [p for p in parts if keep(p)]
-        if len(kept) == len(parts):
+        kept = [new for new in (filtered(p) for p in parts) if new is not None]
+        if kept == parts:
             return match.group(0)
         return f"{space}[{'; '.join(kept)}]" if kept else ""
 
@@ -220,7 +272,7 @@ def result(
     chunk_ids are every chunk retrieved and flags/citation_check the validation outcome,
     all for the audit log (FR-18) and the Phase 8 eval.
     """
-    answer = normalize_answer(answer)
+    answer = merge_adjacent_citations(normalize_answer(answer))
     return {
         "answer": answer,
         "citations": build_citations(answer, chunks),

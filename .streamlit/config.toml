@@ -10,3 +10,7 @@ headless = true
 [browser]
 # Don't send usage statistics to Streamlit.
 gatherUsageStats = false
+
+[client]
+# Hide developer options (rerun, settings, deploy) from the demo's toolbar menu.
+toolbarMode = "minimal"

@@ -22,12 +22,15 @@ def _require_key(key: SecretStr | None, env_name: str) -> SecretStr:
     return key
 
 
-def get_chat_model() -> BaseChatModel:
+def get_chat_model(max_retries: int | None = None) -> BaseChatModel:
     """Build the chat model selected by LLM_PROVIDER and LLM_MODEL, at TEMPERATURE (0).
 
     Temperature 0 makes tool choices and wording as repeatable as possible; it does
     not guarantee identical output (see learning/phase-06-api.md).
+    `max_retries=None` keeps the provider client's own retry-with-backoff on errors such
+    as HTTP 429. The eval passes 0 so it can do (and time) the backoff itself.
     """
+    retries = {} if max_retries is None else {"max_retries": max_retries}
     model = settings.llm_model
 
     # Provider imports are local so only the chosen SDK is loaded.
@@ -38,6 +41,7 @@ def get_chat_model() -> BaseChatModel:
             model=model,
             google_api_key=_require_key(settings.google_api_key, "GOOGLE_API_KEY"),
             temperature=TEMPERATURE,
+            **retries,
         )
 
     if settings.llm_provider == "groq":
@@ -47,6 +51,7 @@ def get_chat_model() -> BaseChatModel:
             model=model,
             api_key=_require_key(settings.groq_api_key, "GROQ_API_KEY"),
             temperature=TEMPERATURE,
+            **retries,
         )
 
     raise ValueError(f"Unsupported LLM_PROVIDER: {settings.llm_provider}")

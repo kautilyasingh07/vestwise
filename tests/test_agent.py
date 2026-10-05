@@ -252,3 +252,46 @@ def test_strip_citations(text: str, invalid: set, expected: str) -> None:
 def test_normalize_rewrites_lenticular_brackets() -> None:
     assert agent.normalize_answer("90 days 【ESOP Policy, p. 5】 and 【Grant Letter: Priya Sharma, p. 2】") == \
         "90 days [ESOP Policy, p. 5] and [Grant Letter: Priya Sharma, p. 2]"
+
+
+# --- merged citation tags: [ESOP Policy, p. 5][ESOP Policy, p. 6] -> [ESOP Policy, p. 5, 6] ---
+
+@pytest.mark.parametrize(("text", "merged"), [
+    ("90 days [ESOP Policy, p. 5][ESOP Policy, p. 6].", "90 days [ESOP Policy, p. 5, 6]."),
+    ("90 days [ESOP Policy, p. 5] [ESOP Policy, p. 6] [ESOP Policy, p. 5].", "90 days [ESOP Policy, p. 5, 6]."),
+    ("a [ESOP Policy, p. 6] [Grant Letter: Priya Sharma, p. 2]", "a [ESOP Policy, p. 6] [Grant Letter: Priya Sharma, p. 2]"),
+    ("a [ESOP Policy, p. 5]; b [ESOP Policy, p. 6]", "a [ESOP Policy, p. 5]; b [ESOP Policy, p. 6]"),
+    ("[ESOP Policy, p. 5, 6][ESOP Policy, p. 7]", "[ESOP Policy, p. 5, 6, 7]"),
+    ("[ESOP Policy, p. 6][ESOP Policy, p. 5]", "[ESOP Policy, p. 5, 6]"),
+    ("[ESOP Policy, p. 6; Grant Letter: Priya Sharma, p. 2]", "[ESOP Policy, p. 6; Grant Letter: Priya Sharma, p. 2]"),
+    ("no tags", "no tags"),
+])
+def test_merge_adjacent_citations(text: str, merged: str) -> None:
+    assert agent.merge_adjacent_citations(text) == merged
+    assert agent.merge_adjacent_citations(merged) == merged  # idempotent
+
+
+def test_merged_tag_is_parsed_per_page() -> None:
+    assert agent.cited_tags("[ESOP Policy, p. 5, 6] and [Grant Letter: Priya Sharma, pp. 1, 2]") == [
+        ("ESOP Policy", 5), ("ESOP Policy", 6), ("Grant Letter: Priya Sharma", 1), ("Grant Letter: Priya Sharma", 2)]
+
+
+def test_strip_removes_only_the_invalid_page_of_a_merged_tag() -> None:
+    assert agent.strip_citations("a [ESOP Policy, p. 5, 7] b", {("ESOP Policy", 7)}) == "a [ESOP Policy, p. 5] b"
+    assert agent.strip_citations("a [ESOP Policy, p. 7, 8].", {("ESOP Policy", 7), ("ESOP Policy", 8)}) == "a."
+
+
+def test_merged_tag_with_an_unretrieved_page_is_validated(use_model) -> None:
+    model = use_model([SEARCH, AIMessage(content="90 days [ESOP Policy, p. 5, 7]."),
+                       AIMessage(content="90 days [ESOP Policy, p. 5, 7].")], chunks=[P5, P6])
+    out = agent.run_agent(PRIYA, "window?", as_of=AS_OF)
+    assert "[ESOP Policy, p. 7]" in model.requests[2][-1].content  # the retry names the bad page
+    assert out["answer"] == "90 days [ESOP Policy, p. 5]."
+    assert out["citation_check"] == {"total": 2, "invalid": 1, "retried": True, "stripped": 1}
+
+
+def test_answer_tags_are_merged_and_citations_cover_each_page(use_model) -> None:
+    use_model([SEARCH, AIMessage(content="Lapse [ESOP Policy, p. 6][ESOP Policy, p. 5].")], chunks=[P5, P6])
+    out = agent.run_agent(PRIYA, "leave?", as_of=AS_OF)
+    assert out["answer"] == "Lapse [ESOP Policy, p. 5, 6]."  # merged, pages ascending
+    assert [c["page"] for c in out["citations"]] == [5, 6]
