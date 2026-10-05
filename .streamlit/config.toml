@@ -1,0 +1,12 @@
+# Streamlit settings for the Vestwise UI; applies when Streamlit is started from the repo root
+# (scripts/run_all.sh does that).
+
+[server]
+# Login is simulated (the sidebar picks X-User-Id), so anyone who can reach the UI can act
+# as the admin. Listen on this machine only; the API (uvicorn) also binds 127.0.0.1.
+address = "localhost"
+headless = true
+
+[browser]
+# Don't send usage statistics to Streamlit.
+gatherUsageStats = false
