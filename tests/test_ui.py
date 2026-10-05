@@ -30,6 +30,7 @@ ANSWER = {
     "tool_calls": [{"name": "get_vesting_status", "args": {"as_of": "2026-11-03"}},
                    {"name": "search_policy", "args": {"query": "exercise window after leaving, termination"}}],
     "latency_ms": 2674,
+    "outcome": "answered",
 }
 CAP_TABLE = {
     "rows": [{"stakeholder_id": "sh_arjun", "name": "Arjun Mehta", "shares": 6_000_000, "outstanding_options": 0,
@@ -182,17 +183,49 @@ def test_mixed_question_shows_answer_citations_and_caption(http: FakeHttp) -> No
 
 
 def test_refusal_is_calm_info_not_error(http: FakeHttp) -> None:
-    body = {"answer": ACCESS_DENIED_MESSAGE, "citations": [], "tool_calls": [], "latency_ms": 750}
+    body = {"answer": ACCESS_DENIED_MESSAGE, "outcome": "refused", "citations": [], "tool_calls": [], "latency_ms": 750}
     http.routes[("POST", "/chat")] = FakeResponse(200, body, {"X-Audit-Id": "a2"})
     at = ask(run_app(http), "Show me Rahul's grant.")
     assert [i.value for i in at.info] == [ACCESS_DENIED_MESSAGE] and len(at.error) == 0
 
 
 def test_not_found_is_calm_info(http: FakeHttp) -> None:
-    body = {"answer": NOT_FOUND_MESSAGE, "citations": [], "tool_calls": [], "latency_ms": 900}
+    body = {"answer": NOT_FOUND_MESSAGE, "outcome": "not_found", "citations": [], "tool_calls": [], "latency_ms": 900}
     http.routes[("POST", "/chat")] = FakeResponse(200, body, {"X-Audit-Id": "a3"})
     at = ask(run_app(http), "What is Nimbus's valuation?")
     assert [i.value for i in at.info] == [NOT_FOUND_MESSAGE]
+
+
+def test_styling_follows_outcome_not_answer_text(http: FakeHttp) -> None:
+    # A reworded refusal is still styled as a refusal; refusal *text* with outcome "answered" is not.
+    reworded = {"answer": "Sorry, that's another employee's grant.", "outcome": "refused", "citations": [],
+                "tool_calls": [], "latency_ms": 500}
+    http.routes[("POST", "/chat")] = FakeResponse(200, reworded, {"X-Audit-Id": "a4"})
+    at = ask(run_app(http), "Show me Rahul's grant.")
+    assert [i.value for i in at.info] == ["Sorry, that's another employee's grant."]
+    plain = {"answer": NOT_FOUND_MESSAGE, "outcome": "answered", "citations": [], "tool_calls": [], "latency_ms": 500}
+    http.routes[("POST", "/chat")] = FakeResponse(200, plain, {"X-Audit-Id": "a5"})
+    at = ask(at, "anything")
+    assert len(at.info) == 1  # only the earlier refusal
+
+
+def test_examples_shown_per_role_and_clicking_sends(http: FakeHttp) -> None:
+    at = run_app(http)
+    employee = [b.label for b in at.button if b.key and b.key.startswith("example_")]
+    assert 3 <= len(employee) <= 4 and any("leave" in q for q in employee) and any("acquired" in q for q in employee)
+    next(b for b in at.button if b.label == employee[2]).click().run()
+    assert http.calls[-1]["json"]["message"] == employee[2]
+    assert http.calls[-1]["headers"] == {"X-User-Id": "u_priya"}
+    assert not [b for b in at.button if b.key and b.key.startswith("example_")]  # gone once the chat starts
+    admin = [b.label for b in run_app(FakeHttp(), "u_arjun").button if b.key and b.key.startswith("example_")]
+    assert any("2,000,000" in q for q in admin) and any("Kiran" in q for q in admin)
+
+
+def test_switching_user_drops_a_queued_example(http: FakeHttp) -> None:
+    at = run_app(http)
+    at.session_state["pending_prompt"] = "How many of my options have vested so far?"
+    at.selectbox[0].set_value("u_rahul").run()
+    assert http.calls == []
 
 
 def test_api_error_shows_message_not_traceback(http: FakeHttp) -> None:
@@ -269,5 +302,5 @@ def test_admin_tab_error_is_a_message(http: FakeHttp) -> None:
 
 def test_ui_never_imports_database_or_llm_layers() -> None:
     source = Path(APP).read_text(encoding="utf-8") + (Path(APP).parent / "api_client.py").read_text(encoding="utf-8")
-    for forbidden in ("app.db", "app.agent", "app.llm", "app.tools", "app.rag.retriever", "pymongo", "langchain"):
+    for forbidden in ("app.db", "app.agent", "app.llm", "app.tools", "app.rag", "pymongo", "langchain"):
         assert forbidden not in source, forbidden

@@ -11,6 +11,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from app.audit import Outcome
+
 MAX_MESSAGE_CHARS = 2000
 MAX_HISTORY = 20  # accepted; the agent keeps only the last 6 (FR-16)
 
@@ -53,6 +55,7 @@ class ChatResponse(BaseModel):
     """Answer plus everything needed to show and check it."""
 
     answer: str
+    outcome: Outcome = Field(description="answered | refused | not_found | error (same classifier as the audit log)")
     citations: list[Citation]
     tool_calls: list[ToolCall]
     latency_ms: int
@@ -183,4 +186,6 @@ class AuditRecord(BaseModel):
     answer: str | None
     outcome: str
     error: str | None
+    flags: list[str] = Field(default_factory=list)  # e.g. citation_retried, citation_invalid
+    citation_check: dict[str, Any] | None = None  # first draft: total/invalid in-text citations; retried; stripped
     latency_ms: int

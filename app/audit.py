@@ -20,7 +20,8 @@ MAX_LIMIT = 200
 
 
 def classify(answer: str | None, error: str | None) -> Outcome:
-    """Coarse outcome, so an admin can filter refusals and failures without reading every answer."""
+    """Coarse outcome of a turn. The one classifier for both the /chat response's `outcome`
+    (the UI styles by it) and the audit record, so the two can never disagree."""
     if error is not None:
         return "error"
     if answer == NOT_FOUND_MESSAGE:
@@ -40,9 +41,15 @@ def build_record(
     *,
     as_of: date | None = None,
     error: str | None = None,
+    flags: list[str] | None = None,
+    citation_check: dict[str, Any] | None = None,
     ts: datetime | None = None,
 ) -> dict[str, Any]:
-    """The `audit_logs` document. Pure: no I/O, so it is unit-testable."""
+    """The `audit_logs` document. Pure: no I/O, so it is unit-testable.
+
+    `flags` carries quality signals from the agent, e.g. "citation_invalid" when an
+    in-text citation pointed at a page that wasn't retrieved and had to be stripped.
+    """
     return {
         "company_id": ctx.company_id,
         "user_id": ctx.user_id,
@@ -56,6 +63,8 @@ def build_record(
         "answer": answer,
         "outcome": classify(answer, error),
         "error": error,
+        "flags": flags or [],
+        "citation_check": citation_check,
         "latency_ms": latency_ms,
         "ts": ts or datetime.now(UTC),
     }
@@ -71,13 +80,16 @@ def write_audit(
     *,
     as_of: date | None = None,
     error: str | None = None,
+    flags: list[str] | None = None,
+    citation_check: dict[str, Any] | None = None,
 ) -> str:
     """Insert one audit record and return its id.
 
     Example: write_audit(ctx, "How many options have I vested?", [], [{"name": "get_vesting_status",
     "args": {"as_of": "2026-10-03"}}], "You have vested 2,100 options.", 1840) -> "6702f0..."
     """
-    record = build_record(ctx, question, chunk_ids, tool_calls, answer, latency_ms, as_of=as_of, error=error)
+    record = build_record(ctx, question, chunk_ids, tool_calls, answer, latency_ms, as_of=as_of, error=error,
+                          flags=flags, citation_check=citation_check)
     return str(db.audit_logs().insert_one(record).inserted_id)
 
 

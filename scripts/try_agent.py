@@ -131,6 +131,11 @@ def run_case(case: Case) -> bool:
         print(f"  cite: [{c['doc_title']}, p. {c['page']}] {c['section']}")
     for t in r["tool_calls"]:
         print(f"  tool: {t['name']}({t['args']})")
+    check = r["citation_check"]
+    if check["total"] or r["flags"]:
+        print(f"  citation check: {check['total'] - check['invalid']}/{check['total']} valid in first draft"
+              f"{', retried' if check['retried'] else ''}{', stripped ' + str(check['stripped']) if check['stripped'] else ''}"
+              f"{' | flags: ' + ', '.join(r['flags']) if r['flags'] else ''}")
     ok = True
     for label, check in case.checks.items():
         passed = check(r)

@@ -9,6 +9,11 @@ The loop, written out so every step is visible:
 Citations are built from the chunks search_policy actually returned, keeping only the
 ones whose [title, p. N] tag appears in the answer. A tag the model made up matches no
 retrieved chunk, so it never becomes a citation.
+
+Citation validation (grounding): the in-text tags themselves are also checked against the
+(doc_title, page) pairs retrieved in this turn. An invalid tag triggers one corrective
+retry listing the valid sources; if the retry is still invalid, the invalid tags are
+stripped from the answer and the turn is flagged "citation_invalid" for the audit log.
 """
 
 import re
@@ -42,7 +47,12 @@ SPACE_AND_HYPHEN = str.maketrans({
     "​": "",   # zero-width space (gpt-oss wrote an empty "【<U+200B>】")
 })
 EMPTY_BRACKETS_RE = re.compile(r" ?(\[\s*\]|【\s*】)")  # citation markers with nothing inside
+LENTICULAR_RE = re.compile(r"【([^【】]*)】")  # gpt-oss's 【...】 -> [...]
+SQUARE_RE = re.compile(r"(\s?)\[([^\[\]]+)\]")  # a [...] group and the space before it
 TAG_RE = re.compile(r"^(.+?),\s*p\.\s*(\d+)$")  # "ESOP Policy, p. 6"
+
+FLAG_CITATION_RETRIED = "citation_retried"  # the first draft cited an unretrieved page; a corrective retry ran
+FLAG_CITATION_INVALID = "citation_invalid"  # still invalid after the retry; the invalid tags were stripped
 
 LIMIT_REACHED = (f"Not run: the limit of {MAX_TOOL_CALLS} tool calls per question was reached. "
                  "Answer now with the information you already have.")
@@ -72,13 +82,14 @@ def run_tool(tools: dict[str, BaseTool], call: dict[str, Any]) -> ToolMessage:
 
 def normalize_answer(text: str) -> str:
     """Unicode NFKC, then plain spaces and "-" for the no-break spaces and hyphens models emit;
-    zero-width spaces and empty citation brackets are removed.
+    zero-width spaces and empty citation brackets are removed, and 【...】 becomes [...].
 
-    Example: "50<U+202F>% within 90<U+00A0>days of 2026<U+2011>11<U+2011>03"
-          -> "50 % within 90 days of 2026-11-03"
+    Example: "50<U+202F>% within 90<U+00A0>days of 2026<U+2011>11<U+2011>03 【ESOP Policy, p. 5】"
+          -> "50 % within 90 days of 2026-11-03 [ESOP Policy, p. 5]"
     """
     text = unicodedata.normalize("NFKC", text).translate(SPACE_AND_HYPHEN)
-    return EMPTY_BRACKETS_RE.sub("", text)
+    text = EMPTY_BRACKETS_RE.sub("", text)
+    return LENTICULAR_RE.sub(r"[\1]", text)
 
 
 def cited_tags(answer: str) -> list[tuple[str, int]]:
@@ -114,19 +125,109 @@ def build_citations(answer: str, chunks: list[RetrievedChunk]) -> list[dict[str,
     return citations
 
 
+def tag(key: tuple[str, int]) -> str:
+    """("ESOP Policy", 6) -> "[ESOP Policy, p. 6]"."""
+    return f"[{key[0]}, p. {key[1]}]"
+
+
+def invalid_tags(answer: str, valid: set[tuple[str, int]]) -> list[tuple[str, int]]:
+    """Cited (title, page) pairs that were not retrieved this turn, unique, in order of appearance."""
+    return list(dict.fromkeys(key for key in cited_tags(answer) if key not in valid))
+
+
+def strip_citations(answer: str, invalid: set[tuple[str, int]]) -> str:
+    """Remove invalid tags from the (normalised, square-bracket) answer; keep valid tags and other brackets.
+
+    "[ESOP Policy, p. 6; ESOP Policy, p. 7]" with p. 7 invalid -> "[ESOP Policy, p. 6]";
+    " [ESOP Policy, p. 7]" alone -> "" (with its leading space).
+    """
+    def keep(part: str) -> bool:
+        match = TAG_RE.match(part.strip())
+        return not match or (match.group(1).strip(), int(match.group(2))) not in invalid
+
+    def rewrite(match: re.Match[str]) -> str:
+        space, inner = match.group(1), match.group(2)
+        parts = [p.strip() for p in inner.split(";")]
+        kept = [p for p in parts if keep(p)]
+        if len(kept) == len(parts):
+            return match.group(0)
+        return f"{space}[{'; '.join(kept)}]" if kept else ""
+
+    return SQUARE_RE.sub(rewrite, answer)
+
+
+def correction_message(invalid: list[tuple[str, int]], valid: set[tuple[str, int]]) -> str:
+    """The corrective user turn for the single retry: what was wrong and the only sources allowed."""
+    bad = ", ".join(tag(k) for k in invalid)
+    if valid:
+        allowed = "The only valid sources are: " + ", ".join(tag(k) for k in sorted(valid)) + "."
+    else:
+        allowed = "No documents were retrieved, so the answer must not contain any [Title, p. N] citation."
+    return (f"Citation check: your answer cites {bad}, which search_policy did not return in this conversation. "
+            f"{allowed} Rewrite your answer: cite each fact only with the source it actually came from, and "
+            "remove any statement you cannot support with those sources. Keep every number from the tool "
+            "results unchanged. Do not call tools. Reply with the corrected answer only.")
+
+
+def validate_citations(
+    model: Any, messages: list[BaseMessage], answer: str, chunks: list[RetrievedChunk]
+) -> tuple[str, list[str], dict[str, Any]]:
+    """Check in-text citations against what was retrieved; one corrective retry; strip what's still invalid.
+
+    Returns (answer, flags, check). `check` describes the *first draft* (total and invalid in-text
+    citations, for Phase 8's citation-precision metric), whether a retry ran, and how many tags
+    were stripped from the final answer.
+    """
+    valid = {(c.doc_title, c.page) for c in chunks}
+    answer = normalize_answer(answer)
+    invalid = invalid_tags(answer, valid)
+    check = {"total": len(cited_tags(answer)), "invalid": len(invalid), "retried": False, "stripped": 0}
+    if not invalid:
+        return answer, [], check
+
+    check["retried"] = True
+    messages.append(HumanMessage(content=correction_message(invalid, valid)))
+    retry = model.invoke(messages)
+    if not retry.tool_calls and retry.text.strip():  # a retry that asks for tools is ignored
+        messages.append(retry)
+        answer = normalize_answer(retry.text.strip())
+        invalid = invalid_tags(answer, valid)
+    if not invalid:
+        return answer, [FLAG_CITATION_RETRIED], check
+
+    still_invalid = set(invalid)
+    check["stripped"] = sum(1 for key in cited_tags(answer) if key in still_invalid)
+    return strip_citations(answer, still_invalid), [FLAG_CITATION_RETRIED, FLAG_CITATION_INVALID], check
+
+
 def nothing_found(tool_calls: list[dict[str, Any]], chunks: list[RetrievedChunk]) -> bool:
     """True for a pure policy question whose searches all came back empty (FR-8 short-circuit)."""
     return bool(tool_calls) and all(c["name"] == SEARCH_POLICY for c in tool_calls) and not chunks
 
 
-def result(answer: str, tool_calls: list[dict[str, Any]], chunks: list[RetrievedChunk]) -> dict[str, Any]:
-    """The turn's output, answer normalised; chunk_ids are every chunk retrieved, for the audit log (FR-18)."""
+NO_CHECK: dict[str, Any] = {"total": 0, "invalid": 0, "retried": False, "stripped": 0}
+
+
+def result(
+    answer: str,
+    tool_calls: list[dict[str, Any]],
+    chunks: list[RetrievedChunk],
+    flags: list[str] | None = None,
+    citation_check: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """The turn's output, answer normalised.
+
+    chunk_ids are every chunk retrieved and flags/citation_check the validation outcome,
+    all for the audit log (FR-18) and the Phase 8 eval.
+    """
     answer = normalize_answer(answer)
     return {
         "answer": answer,
         "citations": build_citations(answer, chunks),
         "tool_calls": tool_calls,
         "chunk_ids": list(dict.fromkeys(c.chunk_id for c in chunks)),
+        "flags": flags or [],
+        "citation_check": citation_check or dict(NO_CHECK),
     }
 
 
@@ -136,8 +237,9 @@ def run_agent(
     history: list[dict[str, str]] | None = None,
     as_of: date | None = None,
 ) -> dict[str, Any]:
-    """Answer one user message with tools; returns {answer, citations, tool_calls, chunk_ids}.
+    """Answer one user message with tools.
 
+    Returns {answer, citations, tool_calls, chunk_ids, flags, citation_check}.
     `as_of` fixes "today" in both the prompt and the tools (tests, eval).
     Example: run_agent(load_context("u_priya"), "How many options have I vested?", as_of=date(2026, 10, 3))
     -> answer mentions 2,100; tool_calls == [{"name": "get_vesting_status", "args": {}}]
@@ -157,7 +259,10 @@ def run_agent(
         reply = model.invoke(messages)
         messages.append(reply)
         if not reply.tool_calls:
-            return result(reply.text.strip() or NO_ANSWER, tool_calls, chunks)
+            if not reply.text.strip():
+                return result(NO_ANSWER, tool_calls, chunks)
+            answer, flags, check = validate_citations(model, messages, reply.text, chunks)
+            return result(answer, tool_calls, chunks, flags, check)
         for call in reply.tool_calls:
             if len(tool_calls) >= MAX_TOOL_CALLS:
                 # Every tool call must get a reply, or the provider rejects the next request.

@@ -35,8 +35,8 @@ def test_chat_returns_answer_citations_tools_latency(api: Api) -> None:
     response = chat(api, as_of="2026-10-03")
     assert response.status_code == 200
     body = response.json()
-    assert set(body) == {"answer", "citations", "tool_calls", "latency_ms"}
-    assert "2,100" in body["answer"]
+    assert set(body) == {"answer", "outcome", "citations", "tool_calls", "latency_ms"}
+    assert "2,100" in body["answer"] and body["outcome"] == "answered"
     assert body["citations"][0]["page"] == 3 and body["tool_calls"][0]["name"] == "get_vesting_status"
     assert isinstance(body["latency_ms"], int) and body["latency_ms"] >= 0
 
@@ -63,8 +63,22 @@ def test_every_chat_writes_one_audit_record_with_agent_chunk_ids(api: Api) -> No
 @pytest.mark.parametrize(("answer", "outcome"), [(ACCESS_DENIED_MESSAGE, "refused"), (NOT_FOUND_MESSAGE, "not_found")])
 def test_refusals_and_not_found_are_audited(api: Api, answer: str, outcome: str) -> None:
     api.agent.result = {"answer": answer, "citations": [], "tool_calls": [], "chunk_ids": []}
-    assert chat(api, "Show me Rahul's grant.").status_code == 200
+    response = chat(api, "Show me Rahul's grant.")
+    assert response.status_code == 200
+    assert response.json()["outcome"] == outcome  # same classifier as the audit record
     assert api.audit.records[0]["outcome"] == outcome and api.audit.records[0]["answer"] == answer
+
+
+def test_citation_flags_and_check_reach_the_audit_record(api: Api) -> None:
+    api.agent.result = {**api.agent.result, "flags": ["citation_retried", "citation_invalid"],
+                        "citation_check": {"total": 3, "invalid": 1, "retried": True, "stripped": 1}}
+    response = chat(api, "If I leave next month, how many options do I keep?", user="u_rahul")
+    assert response.status_code == 200 and "flags" not in response.json()  # internal: audit only
+    [record] = api.audit.records
+    assert record["flags"] == ["citation_retried", "citation_invalid"]
+    assert record["citation_check"] == {"total": 3, "invalid": 1, "retried": True, "stripped": 1}
+    listed = api.client.get("/audit", headers=api.as_user("u_arjun")).json()[0]
+    assert listed["flags"] == ["citation_retried", "citation_invalid"] and listed["citation_check"]["invalid"] == 1
 
 
 def test_agent_error_is_audited_and_returns_clean_500(api: Api) -> None:

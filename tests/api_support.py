@@ -82,6 +82,8 @@ class FakeAgent:
                        "snippet": "4.1 Vesting period ...", "chunk_id": "nimbus_x_007"}],
         "tool_calls": [{"name": "get_vesting_status", "args": {"as_of": "2026-10-03"}}],
         "chunk_ids": ["nimbus_x_007", "nimbus_x_008"],
+        "flags": [],
+        "citation_check": {"total": 1, "invalid": 0, "retried": False, "stripped": 0},
     })
     error: Exception | None = None
     calls: list[tuple[RequestContext, str, list[dict[str, str]], date | None]] = field(default_factory=list)
@@ -102,10 +104,12 @@ class FakeAudit:
     fail: bool = False
 
     def write(self, ctx: RequestContext, question: str, chunk_ids: list[str], tool_calls: list[dict[str, Any]],
-              answer: str | None, latency_ms: int, *, as_of: date | None = None, error: str | None = None) -> str:
+              answer: str | None, latency_ms: int, *, as_of: date | None = None, error: str | None = None,
+              flags: list[str] | None = None, citation_check: dict[str, Any] | None = None) -> str:
         if self.fail:
             raise ConnectionError("audit store down")
-        record = build_record(ctx, question, chunk_ids, tool_calls, answer, latency_ms, as_of=as_of, error=error)
+        record = build_record(ctx, question, chunk_ids, tool_calls, answer, latency_ms, as_of=as_of, error=error,
+                              flags=flags, citation_check=citation_check)
         record["id"] = f"audit_{len(self.records) + 1}"
         self.records.append(record)
         return record["id"]

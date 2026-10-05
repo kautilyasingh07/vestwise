@@ -22,7 +22,6 @@ import pandas as pd  # noqa: E402
 import streamlit as st  # noqa: E402
 
 from app.config import settings  # noqa: E402
-from app.rag.prompts import ACCESS_DENIED_MESSAGE, NOT_FOUND_MESSAGE  # noqa: E402
 from ui import api_client as api  # noqa: E402
 
 DEFAULT_AS_OF = date(2026, 10, 3)  # spec §8.4 demo date
@@ -46,6 +45,23 @@ USERS = [
 ]
 USERS_BY_ID = {u.user_id: u for u in USERS}
 
+# Clickable starters on an empty conversation, by role.
+EXAMPLES: dict[str, list[str]] = {
+    "employee": [
+        "How many of my options have vested so far?",
+        "When do my next options vest, and how many?",
+        "If I leave next month, how many options do I keep and how long do I have to exercise them?",
+        "What happens to my options if the company is acquired?",
+    ],
+    "admin": [
+        "If we issue 2,000,000 new shares to Horizon Capital, how does ownership change?",
+        "What is Kiran's vesting status, and when does Kiran's exercise window end?",
+        "How many options has Priya vested, and when is her next vest?",
+        "What happens to employees' unvested options on a change of control?",
+    ],
+}
+STYLED_OUTCOMES = {"answered", "refused", "not_found"}
+
 
 # --- session state ---
 
@@ -61,6 +77,7 @@ def reset_conversation() -> None:
     """Called when the user changes: a new person must never see the previous person's chat."""
     st.session_state.messages = []
     st.session_state.dilution_result = None
+    st.session_state.pop("pending_prompt", None)
 
 
 def history_for_api(messages: list[dict[str, Any]]) -> list[dict[str, str]]:
@@ -69,13 +86,14 @@ def history_for_api(messages: list[dict[str, Any]]) -> list[dict[str, str]]:
     return turns[-HISTORY_TURNS:]
 
 
-def kind_of(answer: str) -> str:
-    """How to style an answer: the API's exact refusal sentences get a calm, distinct box."""
-    if answer == ACCESS_DENIED_MESSAGE:
-        return "refused"
-    if answer == NOT_FOUND_MESSAGE:
-        return "not_found"
-    return "answer"
+def kind_of(outcome: str | None) -> str:
+    """How to style an answer, from the API's `outcome` field (no string matching on the answer)."""
+    return outcome if outcome in STYLED_OUTCOMES else "answered"
+
+
+def queue_example(question: str) -> None:
+    """on_click for an example button: runs before the rerun, which then sends it like typed input."""
+    st.session_state.pending_prompt = question
 
 
 def assistant_message(result: api.ApiResult) -> dict[str, Any]:
@@ -85,7 +103,7 @@ def assistant_message(result: api.ApiResult) -> dict[str, Any]:
     data = result.data
     return {
         "role": "assistant",
-        "kind": kind_of(data["answer"]),
+        "kind": kind_of(data.get("outcome")),
         "content": data["answer"],
         "citations": data.get("citations", []),
         "tool_calls": data.get("tool_calls", []),
@@ -119,7 +137,7 @@ def caption_for(message: dict[str, Any]) -> str:
 def render_message(message: dict[str, Any]) -> None:
     """One chat bubble: the text (styled by kind), then citations and the caption."""
     with st.chat_message(message["role"]):
-        kind = message.get("kind", "answer")
+        kind = message.get("kind", "answered")
         if kind == "refused":
             st.info(message["content"], icon=":material/lock:")
         elif kind == "not_found":
@@ -135,14 +153,24 @@ def render_message(message: dict[str, Any]) -> None:
             st.caption(caption_for(message))
 
 
+def example_buttons(user: DemoUser) -> None:
+    """3-4 starter questions for the signed-in role; clicking one sends it."""
+    scope = "any grant, the cap table or the ESOP policy" if user.role == "admin" else "your options or the ESOP policy"
+    st.caption(f"Ask about {scope}, or try one of these:")
+    for i, question in enumerate(EXAMPLES[user.role]):
+        st.button(question, key=f"example_{user.role}_{i}", on_click=queue_example, args=(question,),
+                  icon=":material/chat_bubble:")
+
+
 def chat_panel(user: DemoUser, as_of: date) -> None:
     """Conversation so far, then the input; a new message is sent to /chat and the page reruns."""
     if not st.session_state.messages:
-        st.caption(f"Ask {'about any grant, the cap table or the ESOP policy' if user.role == 'admin' else 'about your options or the ESOP policy'}.")
+        example_buttons(user)
     for message in st.session_state.messages:
         render_message(message)
 
-    prompt = st.chat_input(f"Ask as {user.name.split()[0]}…")
+    typed = st.chat_input(f"Ask as {user.name.split()[0]}…")
+    prompt = typed or st.session_state.pop("pending_prompt", None)
     if not prompt:
         return
     history = history_for_api(st.session_state.messages)

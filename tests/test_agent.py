@@ -4,7 +4,7 @@ from datetime import date
 from typing import Any
 
 import pytest
-from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 
 try:
     from app import agent
@@ -163,7 +163,7 @@ def test_returned_answer_is_normalised_and_its_citation_parsed(use_model) -> Non
         AIMessage(content="Within 90 days 【ESOP Policy, p. 5】."),
     ], chunks=[P5])
     out = agent.run_agent(PRIYA, "exercise window?", as_of=AS_OF)
-    assert out["answer"] == "Within 90 days 【ESOP Policy, p. 5】."
+    assert out["answer"] == "Within 90 days [ESOP Policy, p. 5]."  # 【...】 rewritten to [...]
     assert [(c["doc_title"], c["page"]) for c in out["citations"]] == [("ESOP Policy", 5)]
 
 
@@ -176,3 +176,79 @@ def test_history_keeps_last_six() -> None:
     history = [{"role": "user" if i % 2 == 0 else "assistant", "content": str(i)} for i in range(10)]
     messages = agent.to_messages(history)
     assert [m.content for m in messages] == [str(i) for i in range(4, 10)]
+
+
+# --- citation validation (grounding bug: Rahul's answer cited p. 7, only p. 5 and p. 6 were retrieved) ---
+
+P6 = RetrievedChunk("pol_014", "pol", "ESOP Policy", "policy", 6, "7. Termination of Employment",
+                    "7.1 Unvested Options lapse on the Last Working Day ...", 0.52, None)
+SEARCH = AIMessage(content="", tool_calls=[call("search_policy", {"query": "exercise window after leaving"}, "s1")])
+BAD = "You keep vested options [ESOP Policy, p. 6] and have 90 days [ESOP Policy, p. 7]."
+GOOD = "You keep vested options [ESOP Policy, p. 6] and have 90 days [ESOP Policy, p. 5]."
+
+
+def test_valid_citations_need_no_retry(use_model) -> None:
+    model = use_model([SEARCH, AIMessage(content=GOOD)], chunks=[P5, P6])
+    out = agent.run_agent(PRIYA, "leave?", as_of=AS_OF)
+    assert out["answer"] == GOOD and out["flags"] == []
+    assert out["citation_check"] == {"total": 2, "invalid": 0, "retried": False, "stripped": 0}
+    assert len(model.requests) == 2  # no corrective call
+
+
+def test_invalid_citation_is_fixed_by_one_corrective_retry(use_model) -> None:
+    model = use_model([SEARCH, AIMessage(content=BAD), AIMessage(content=GOOD)], chunks=[P5, P6])
+    out = agent.run_agent(PRIYA, "leave?", as_of=AS_OF)
+    assert out["answer"] == GOOD and out["flags"] == [agent.FLAG_CITATION_RETRIED]
+    assert out["citation_check"] == {"total": 2, "invalid": 1, "retried": True, "stripped": 0}  # first draft
+    correction = model.requests[2][-1]
+    assert isinstance(correction, HumanMessage)
+    assert "[ESOP Policy, p. 7]" in correction.content
+    assert "[ESOP Policy, p. 5], [ESOP Policy, p. 6]" in correction.content  # the valid sources, listed
+    assert [(c["doc_title"], c["page"]) for c in out["citations"]] == [("ESOP Policy", 6), ("ESOP Policy", 5)]
+
+
+def test_still_invalid_after_retry_is_stripped_and_flagged(use_model) -> None:
+    model = use_model([SEARCH, AIMessage(content=BAD), AIMessage(content=BAD)], chunks=[P5, P6])
+    out = agent.run_agent(PRIYA, "leave?", as_of=AS_OF)
+    assert out["answer"] == "You keep vested options [ESOP Policy, p. 6] and have 90 days."
+    assert out["flags"] == [agent.FLAG_CITATION_RETRIED, agent.FLAG_CITATION_INVALID]
+    assert out["citation_check"] == {"total": 2, "invalid": 1, "retried": True, "stripped": 1}
+    assert len(model.requests) == 3  # exactly one retry
+
+
+def test_retry_that_asks_for_tools_keeps_the_draft_and_strips(use_model) -> None:
+    use_model([SEARCH, AIMessage(content=BAD), AIMessage(content="", tool_calls=[call("get_grants", {}, "g")])],
+              chunks=[P5, P6])
+    out = agent.run_agent(PRIYA, "leave?", as_of=AS_OF)
+    assert out["answer"] == "You keep vested options [ESOP Policy, p. 6] and have 90 days."
+    assert agent.FLAG_CITATION_INVALID in out["flags"]
+
+
+def test_citation_without_any_search_is_invalid(use_model) -> None:
+    model = use_model([AIMessage(content="Options vest monthly [ESOP Policy, p. 3]."),
+                       AIMessage(content="Options vest monthly [ESOP Policy, p. 3].")])
+    out = agent.run_agent(PRIYA, "how do options vest?", as_of=AS_OF)
+    assert out["answer"] == "Options vest monthly."
+    assert "must not contain any [Title, p. N] citation" in model.requests[1][-1].content
+
+
+def test_lenticular_invalid_citation_is_caught_after_rewrite(use_model) -> None:
+    use_model([SEARCH, AIMessage(content="90 days 【ESOP Policy, p. 7】."), AIMessage(content="90 days 【ESOP Policy, p. 5】.")],
+              chunks=[P5])
+    out = agent.run_agent(PRIYA, "window?", as_of=AS_OF)
+    assert out["answer"] == "90 days [ESOP Policy, p. 5]." and out["flags"] == [agent.FLAG_CITATION_RETRIED]
+
+
+@pytest.mark.parametrize(("text", "invalid", "expected"), [
+    ("a [ESOP Policy, p. 7].", {("ESOP Policy", 7)}, "a."),
+    ("a [ESOP Policy, p. 6; ESOP Policy, p. 7] b", {("ESOP Policy", 7)}, "a [ESOP Policy, p. 6] b"),
+    ("a [ESOP Policy, p. 6] b", {("ESOP Policy", 7)}, "a [ESOP Policy, p. 6] b"),
+    ("see [get_vesting_status] and [ESOP Policy, p.7]", {("ESOP Policy", 7)}, "see [get_vesting_status] and"),
+])
+def test_strip_citations(text: str, invalid: set, expected: str) -> None:
+    assert agent.strip_citations(text, invalid) == expected
+
+
+def test_normalize_rewrites_lenticular_brackets() -> None:
+    assert agent.normalize_answer("90 days 【ESOP Policy, p. 5】 and 【Grant Letter: Priya Sharma, p. 2】") == \
+        "90 days [ESOP Policy, p. 5] and [Grant Letter: Priya Sharma, p. 2]"

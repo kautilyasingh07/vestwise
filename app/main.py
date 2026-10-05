@@ -26,7 +26,7 @@ from fastapi import Depends, FastAPI, Form, Header, HTTPException, Query, Respon
 from pypdf.errors import PdfReadError
 
 from app.agent import run_agent
-from app.audit import MAX_LIMIT, read_audit, write_audit
+from app.audit import MAX_LIMIT, classify, read_audit, write_audit
 from app.config import settings
 from app.context import RequestContext, UnknownUserError, load_context
 from app.ingest.loader import pdf_title
@@ -144,7 +144,9 @@ def chat(
 ) -> ChatResponse:
     """Answer one message as the header's user. Every call is audit-logged, including failures.
 
-    The audit record id is returned in the `X-Audit-Id` response header.
+    `outcome` (answered | refused | not_found) comes from the same classifier as the audit
+    record. A failure is a 500 whose audit record has outcome "error". The audit record id
+    is returned in the `X-Audit-Id` response header.
     """
     start = time.monotonic()
     history = [item.model_dump() for item in body.history]
@@ -163,13 +165,14 @@ def chat(
     latency = elapsed_ms(start)
     try:
         audit_id = audit(ctx, body.message, result["chunk_ids"], result["tool_calls"], result["answer"],
-                         latency, as_of=body.as_of)
+                         latency, as_of=body.as_of, flags=result.get("flags", []),
+                         citation_check=result.get("citation_check"))
     except Exception:  # noqa: BLE001 - fail closed: no answer leaves without an audit record
         logger.exception("audit write failed for user %s", ctx.user_id)
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, CHAT_ERROR) from None
     response.headers["X-Audit-Id"] = audit_id
-    return ChatResponse(answer=result["answer"], citations=result["citations"],
-                        tool_calls=result["tool_calls"], latency_ms=latency)
+    return ChatResponse(answer=result["answer"], outcome=classify(result["answer"], None),
+                        citations=result["citations"], tool_calls=result["tool_calls"], latency_ms=latency)
 
 
 # --- /vesting ---
