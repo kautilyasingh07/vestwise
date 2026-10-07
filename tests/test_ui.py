@@ -166,7 +166,7 @@ def test_employee_sees_chat_only(http: FakeHttp) -> None:
 def test_admin_sees_admin_tabs(http: FakeHttp) -> None:
     at = run_app(http, "u_arjun")
     assert not at.exception
-    assert [t.label for t in at.tabs] == ["Chat", "Cap table", "Dilution", "Audit log"]
+    assert [t.label for t in at.tabs] == ["Chat", "Cap table", "Dilution", "Review grant letter", "Audit log"]
     assert http.calls == []  # lazy tabs: only the open Chat tab ran
 
 
@@ -298,6 +298,58 @@ def test_admin_tab_error_is_a_message(http: FakeHttp) -> None:
     http.routes[("GET", "/captable")] = FakeResponse(403, {"detail": "Admin only"})
     at = open_tab(run_app(http, "u_arjun"), "Cap table")
     assert not at.exception and "don't have access" in at.error[0].value
+
+
+COMPLIANCE = {
+    "letter_title": "Draft Grant Letter: Vikram Nair", "file_hash": "ab" * 32, "outcome": "issues_found",
+    "summary": "Draft Grant Letter: Vikram Nair: 8 match, 2 conflict",
+    "counts": {"match": 8, "conflict": 2, "missing": 0, "not_covered": 0, "exceeds_pool": 0},
+    "findings": [{
+        "id": "F4", "field": "cliff_months", "label": "cliff", "status": "conflict", "letter_value": 6,
+        "letter_text": "6 months", "requirement": "12 months",
+        "letter_citation": {"doc_title": "Draft Grant Letter: Vikram Nair", "page": 1, "clause": None,
+                            "source_text": "Cliff 6 months", "label": "[Draft Grant Letter: Vikram Nair, p. 1]"},
+        "policy_citations": [{"doc_title": "ESOP Policy", "page": 3, "clause": "4.2", "source_text": "...",
+                              "label": "[ESOP Policy, p. 3, clause 4.2]"}],
+        "rule_ids": ["R4"], "message": "Conflict: cliff is 6 months ...",
+    }],
+    "report": {"source": "llm", "problems": [], "lines": [{
+        "finding_id": "F4", "status": "conflict",
+        "text": "Conflict: The cliff is 6 months instead of 12. [Draft Grant Letter: Vikram Nair, p. 1] "
+                "[ESOP Policy, p. 3, clause 4.2]"}]},
+    "warnings": [], "llm_calls": 0, "cached": {"extraction": True, "report": True}, "latency_ms": 840,
+}
+
+
+def test_compliance_check_posts_the_pdf_as_multipart(http: FakeHttp) -> None:
+    http.routes[("POST", "/compliance/check")] = FakeResponse(200, COMPLIANCE, {"X-Audit-Id": "a7"})
+    result = api_client.compliance_check(BASE, "u_arjun", "vikram.pdf", b"%PDF-1.4 x")
+    call = http.calls[0]
+    assert call["files"] == {"file": ("vikram.pdf", b"%PDF-1.4 x", "application/pdf")} and call["json"] is None
+    assert call["timeout"] == 120 and call["headers"] == {"X-User-Id": "u_arjun"}
+    assert result.ok and result.audit_id == "a7" and result.data["outcome"] == "issues_found"
+
+
+def test_review_grant_letter_tab_shows_findings_and_report(http: FakeHttp) -> None:
+    at = run_app(http, "u_arjun")
+    at.session_state["compliance_result"] = api_client.ApiResult(ok=True, status=200, data=COMPLIANCE,
+                                                                 audit_id="a7")
+    at = open_tab(at, "Review grant letter")
+    assert not at.exception and http.calls == []  # showing a stored result fetches nothing
+    assert [m.value for m in at.metric][:2] == ["8", "2"]
+    frame = at.dataframe[0].value
+    assert frame["status"].tolist() == ["❌ conflict"]
+    assert frame["policy source"].tolist() == ["[ESOP Policy, p. 3, clause 4.2]"]
+    assert any("[ESOP Policy, p. 3, clause 4.2]" in m.value for m in at.markdown)
+    assert any("audit a7" in c.value for c in at.main.caption)
+    assert [b for b in at.button if b.label == "Check letter"][0].disabled  # nothing uploaded yet
+
+
+def test_review_grant_letter_error_is_a_message(http: FakeHttp) -> None:
+    at = run_app(http, "u_arjun")
+    at.session_state["compliance_result"] = api_client.ApiResult(ok=False, status=409, error="No reviewed rules")
+    at = open_tab(at, "Review grant letter")
+    assert not at.exception and at.error[0].value == "No reviewed rules"
 
 
 def test_ui_never_imports_database_or_llm_layers() -> None:

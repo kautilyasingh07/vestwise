@@ -5,6 +5,7 @@ back as plain dicts with dates as `datetime.date`, ready for the pure
 functions in vesting.py and captable.py.
 """
 
+from datetime import date
 from typing import Any
 
 from app import db
@@ -30,6 +31,14 @@ def get_pool_size(company_id: str) -> int:
     if company is None:
         raise NotFoundError(f"company {company_id!r} not found")
     return company["esop_pool_size"]
+
+
+def get_board_resolution_date(company_id: str) -> date:
+    """Date of the board resolution that created the ESOP pool; no grant may predate it (spec §8.7 step 4)."""
+    company = db.companies().find_one({"_id": company_id}, {"esop_board_resolution_date": 1})
+    if company is None or not company.get("esop_board_resolution_date"):
+        raise NotFoundError(f"company {company_id!r} has no ESOP board resolution date (re-run scripts/seed.py)")
+    return to_date(company["esop_board_resolution_date"])
 
 
 def get_holdings(company_id: str) -> list[dict[str, Any]]:

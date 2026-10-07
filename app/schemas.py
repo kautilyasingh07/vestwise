@@ -12,6 +12,8 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from app.audit import Outcome
+from app.compliance.check import Finding
+from app.compliance.report import Report
 
 MAX_MESSAGE_CHARS = 2000
 MAX_HISTORY = 20  # accepted; the agent keeps only the last 6 (FR-16)
@@ -171,9 +173,10 @@ class DocumentResponse(BaseModel):
 # --- /audit ---
 
 class AuditRecord(BaseModel):
-    """One audit_logs entry (FR-18)."""
+    """One audit_logs entry (FR-18): a chat turn or a compliance check (FR-25)."""
 
     id: str
+    kind: str = "chat"  # "chat" | "compliance_check"; chat records written before Phase 9 have no kind
     ts: datetime
     user_id: str
     role: str
@@ -188,4 +191,23 @@ class AuditRecord(BaseModel):
     error: str | None
     flags: list[str] = Field(default_factory=list)  # e.g. citation_retried, citation_invalid
     citation_check: dict[str, Any] | None = None  # first draft: total/invalid in-text citations; retried; stripped
+    compliance: dict[str, Any] | None = None  # compliance checks only: file hash, counts, findings
+    latency_ms: int
+
+
+# --- /compliance ---
+
+class ComplianceResponse(BaseModel):
+    """Result of POST /compliance/check (spec §8.7, FR-21..25)."""
+
+    letter_title: str
+    file_hash: str
+    outcome: Literal["compliant", "issues_found"]
+    summary: str
+    counts: dict[str, int]
+    findings: list[Finding]
+    report: Report
+    warnings: list[str] = Field(description="Extraction grounding notes: corrected pages, unverifiable quotes")
+    llm_calls: int = Field(description="Live LLM calls this check made (0 when fully cached)")
+    cached: dict[str, bool]
     latency_ms: int

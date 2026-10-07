@@ -71,12 +71,14 @@ def init_state() -> None:
     st.session_state.setdefault("as_of", DEFAULT_AS_OF)
     st.session_state.setdefault("messages", [])
     st.session_state.setdefault("dilution_result", None)  # not "dilution": that key belongs to the form
+    st.session_state.setdefault("compliance_result", None)
 
 
 def reset_conversation() -> None:
     """Called when the user changes: a new person must never see the previous person's chat."""
     st.session_state.messages = []
     st.session_state.dilution_result = None
+    st.session_state.compliance_result = None
     st.session_state.pop("pending_prompt", None)
 
 
@@ -241,6 +243,65 @@ def dilution_panel(user: DemoUser) -> None:
     })
 
 
+STATUS_ICONS = {"match": "✅ match", "conflict": "❌ conflict", "missing": "⚠️ missing",
+                "not_covered": "❔ not covered", "exceeds_pool": "❌ exceeds pool"}
+
+
+def compliance_panel(user: DemoUser) -> None:
+    """Upload a draft grant letter, POST /compliance/check, show findings and report (kept across reruns)."""
+    st.caption("The LLM reads the letter's terms; every verdict is computed in code against the reviewed "
+               "policy rules and the cap table. Each check is audit-logged.")
+    upload = st.file_uploader("Draft grant letter (PDF)", type=["pdf"], key="compliance_upload")
+    if st.button("Check letter", type="primary", disabled=upload is None, icon=":material/fact_check:"):
+        with st.spinner("Checking… (extraction and report may each take an LLM call)"):
+            st.session_state.compliance_result = api.compliance_check(settings.api_url, user.user_id,
+                                                                      upload.name, upload.getvalue())
+    result = st.session_state.compliance_result
+    if result is None:
+        return
+    if not result.ok:
+        st.error(result.error)
+        return
+    render_compliance(result.data, result.audit_id)
+
+
+def render_compliance(data: dict[str, Any], audit_id: str | None) -> None:
+    """Counts, findings table, report and notes for one compliance check."""
+    st.subheader(data["letter_title"])
+    if data["outcome"] == "compliant":
+        st.success("Every term matches the policy and the cap table.", icon=":material/verified:")
+    else:
+        issues = sum(n for status, n in data["counts"].items() if status != "match")
+        st.warning(f"{issues} issue(s) found.", icon=":material/report:")
+    cols = st.columns(len(STATUS_ICONS))
+    for col, (status, label) in zip(cols, STATUS_ICONS.items(), strict=True):
+        col.metric(label, data["counts"].get(status, 0))
+
+    frame = pd.DataFrame([{
+        "id": f["id"],
+        "term": f["label"],
+        "status": STATUS_ICONS.get(f["status"], f["status"]),
+        "letter": f["letter_text"],
+        "policy requires": f["requirement"] or "no rule",
+        "letter source": f["letter_citation"]["label"],
+        "policy source": " ".join(c["label"] for c in f["policy_citations"]) or "—",
+    } for f in data["findings"]])
+    st.dataframe(frame, hide_index=True, width="stretch")
+
+    st.markdown("**Report**")
+    st.markdown("\n".join(f"- {line['text']}" for line in data["report"]["lines"]))
+    if data["report"]["source"] == "llm":
+        st.caption("Phrased by the LLM and checked in code: one line per finding, no new findings or numbers; "
+                   "status, citations and the pool limit's source added by code.")
+    else:
+        st.caption("Template report (no LLM wording). " + "; ".join(data["report"]["problems"]))
+    for warning in data["warnings"]:
+        st.warning(f"Extraction: {warning}", icon=":material/find_in_page:")
+    cached = ", ".join(k for k, v in data["cached"].items() if v) or "nothing"
+    st.caption(f"Live LLM calls: {data['llm_calls']} · cached: {cached} · {data['latency_ms'] / 1000:.1f} s"
+               + (f" · audit {audit_id}" if audit_id else ""))
+
+
 def audit_panel(user: DemoUser) -> None:
     """The latest 20 audit records (GET /audit)."""
     st.button("Refresh", icon=":material/refresh:")  # any click reruns the script, which refetches
@@ -289,8 +350,8 @@ def main() -> None:
     if user.role != "admin":
         chat_panel(user, as_of)
         return
-    chat_tab, cap_tab, dilution_tab, audit_tab = st.tabs(
-        ["Chat", "Cap table", "Dilution", "Audit log"], key="admin_tab", on_change="rerun")
+    chat_tab, cap_tab, dilution_tab, compliance_tab, audit_tab = st.tabs(
+        ["Chat", "Cap table", "Dilution", "Review grant letter", "Audit log"], key="admin_tab", on_change="rerun")
     # Lazy tabs: only the open tab's code runs, so a chat message doesn't refetch the cap table.
     if chat_tab.open:
         with chat_tab:
@@ -301,6 +362,9 @@ def main() -> None:
     if dilution_tab.open:
         with dilution_tab:
             dilution_panel(user)
+    if compliance_tab.open:
+        with compliance_tab:
+            compliance_panel(user)
     if audit_tab.open:
         with audit_tab:
             audit_panel(user)

@@ -93,6 +93,55 @@ def write_audit(
     return str(db.audit_logs().insert_one(record).inserted_id)
 
 
+ComplianceOutcome = Literal["compliant", "issues_found", "error"]
+
+
+def build_compliance_record(
+    ctx: RequestContext,
+    file_name: str,
+    latency_ms: int,
+    *,
+    outcome: ComplianceOutcome,
+    summary: str | None = None,
+    details: dict[str, Any] | None = None,
+    flags: list[str] | None = None,
+    error: str | None = None,
+    ts: datetime | None = None,
+) -> dict[str, Any]:
+    """The audit_logs document for one POST /compliance/check (FR-25). Pure.
+
+    Same top-level shape as a chat record (so GET /audit lists both), with `kind`
+    "compliance_check" and the check itself under `compliance`: file hash, letter
+    title, counts, and each finding's id, field, status and rule ids.
+    """
+    return {
+        "kind": "compliance_check",
+        "company_id": ctx.company_id,
+        "user_id": ctx.user_id,
+        "role": ctx.role,
+        "stakeholder_id": ctx.stakeholder_id,
+        "question": f"Compliance check: {file_name}",
+        "as_of": None,
+        "model": f"{settings.llm_provider}/{settings.llm_model}",
+        "chunk_ids": [],
+        "tool_calls": [],
+        "answer": summary,
+        "outcome": outcome,
+        "error": error,
+        "flags": flags or [],
+        "citation_check": None,
+        "compliance": details,
+        "latency_ms": latency_ms,
+        "ts": ts or datetime.now(UTC),
+    }
+
+
+def write_compliance_audit(ctx: RequestContext, file_name: str, latency_ms: int, **kwargs: Any) -> str:
+    """Insert one compliance-check audit record (see build_compliance_record) and return its id."""
+    record = build_compliance_record(ctx, file_name, latency_ms, **kwargs)
+    return str(db.audit_logs().insert_one(record).inserted_id)
+
+
 def read_audit(company_id: str, limit: int = 50) -> list[dict[str, Any]]:
     """Latest audit records of one company, newest first (uses the company_id + ts index).
 

@@ -34,7 +34,7 @@ SEEDED_COLLECTIONS: dict[str, str] = {
 }
 
 # Fields stored as BSON dates rather than "YYYY-MM-DD" strings.
-DATE_FIELDS = ("grant_date", "termination_date")
+DATE_FIELDS = ("grant_date", "termination_date", "esop_board_resolution_date")
 
 # Spec §7 indexes: collection -> list of (keys, options).
 INDEXES: dict[str, list[tuple[list[tuple[str, int]], dict[str, Any]]]] = {

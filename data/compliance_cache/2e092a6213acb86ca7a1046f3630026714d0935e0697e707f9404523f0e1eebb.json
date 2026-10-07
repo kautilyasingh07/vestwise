@@ -1,0 +1,69 @@
+{
+  "extraction": {
+    "created_at": "2026-10-07T08:01:32+00:00",
+    "model": "openai/gpt-oss-120b",
+    "prompt_version": "extract-v1",
+    "terms": {
+      "acceleration_on_acquisition": {
+        "page": 1,
+        "source_text": "Acceleration on acquisition 50% of Unvested Options vest on a Change of Control",
+        "value": 50.0
+      },
+      "cliff_months": {
+        "page": 1,
+        "source_text": "Cliff 12 months",
+        "value": 12
+      },
+      "exercise_window_days": null,
+      "grant_date": {
+        "page": 1,
+        "source_text": "Grant Date 1 October 2026",
+        "value": "2026-10-01"
+      },
+      "leaver_terms": {
+        "page": 2,
+        "source_text": "If you leave as a Good Leaver, your Unvested Options lapse on your Last Working Day. If you are a Bad Leaver, you forfeit all Vested and Unvested Options.",
+        "value": {
+          "bad_leaver_forfeits_vested": true,
+          "unvested_lapse_on_leaving": true
+        }
+      },
+      "options": {
+        "page": 1,
+        "source_text": "Number of Options 1,200,000",
+        "value": 1200000
+      },
+      "strike_price": {
+        "page": 1,
+        "source_text": "Exercise Price Rs 15 per Share",
+        "value": 15.0
+      },
+      "total_months": {
+        "page": 1,
+        "source_text": "Total vesting period 48 months",
+        "value": 48
+      },
+      "vesting_frequency": {
+        "page": 1,
+        "source_text": "Vesting after the Cliff Monthly, in equal instalments",
+        "value": "monthly"
+      }
+    }
+  },
+  "file_hash": "2e092a6213acb86ca7a1046f3630026714d0935e0697e707f9404523f0e1eebb",
+  "file_name": "grant_letter_neha.pdf",
+  "reports": {
+    "23e32de1741a17b7589a979cdf5fca8ab90ab68fd832a723b29fd1f5590c48e2": {
+      "created_at": "2026-10-07T08:02:05+00:00",
+      "model": "openai/gpt-oss-120b",
+      "prompt_version": "report-v1",
+      "text": "[F1] The letter grants 1,200,000 options, exceeding the policy limit of 989,950 options. \n[F2] The exercise price of Rs 15 in the letter meets the policy minimum of Rs 10. \n[F3] The grant date of 1 October 2026 in the letter complies with the policy requirement of on or after 15 November 2024. \n[F4] The 12\u2011month cliff stated in the letter matches the policy\u2019s 12\u2011month requirement. \n[F5] The total vesting period of 48 months in the letter matches the policy\u2019s 48\u2011month requirement. \n[F6] The monthly vesting frequency in the letter matches the policy\u2019s monthly requirement. \n[F7] The letter does not specify the exercise window after leaving, which the policy requires to be 90 days. \n[F8] The acceleration provision of 50% of unvested options in the letter matches the policy\u2019s 50% requirement. \n[F9] The letter\u2019s provision that unvested options lapse on leaving aligns with the policy\u2019s requirement. \n[F10] The letter\u2019s provision that a bad leaver forfeits vested options aligns with the policy\u2019s requirement."
+    },
+    "63ed629e31158b4aaa408ea3c20f4e1d8158a8db06c5880ac85465628cff86cd": {
+      "created_at": "2026-10-07T11:57:57+00:00",
+      "model": "openai/gpt-oss-120b",
+      "prompt_version": "report-v2",
+      "text": "[F1] The letter proposes 1,200,000 options, which exceeds the available unallocated pool of 989,950 options. \n[F2] The exercise price stated is Rs\u202f15, meeting the minimum requirement of Rs\u202f10. \n[F3] The grant date of 1\u202fOctober\u202f2026 complies with the requirement that it be on or after 15\u202fNovember\u202f2024. \n[F4] The cliff period is set to 12\u202fmonths as required. \n[F5] The total vesting period of 48\u202fmonths aligns with the policy. \n[F6] Vesting is scheduled to occur monthly, as required. \n[F7] The letter does not specify the exercise window after leaving, which should be 90\u202fdays. \n[F8] The acceleration provision grants 50% of unvested options upon acquisition, meeting the requirement. \n[F9] Unvested options will lapse upon leaving, as required. \n[F10] Bad leavers forfeit vested options, as required."
+    }
+  }
+}

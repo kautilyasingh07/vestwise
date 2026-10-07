@@ -77,3 +77,8 @@ def chunks() -> Collection:
 def audit_logs() -> Collection:
     """One record per request: question, chunks, tool calls, answer, latency."""
     return get_db()["audit_logs"]
+
+
+def policy_rules() -> Collection:
+    """Human-reviewed compliance rules extracted from the ESOP policy (spec §8.7, FR-22)."""
+    return get_db()["policy_rules"]

@@ -1,0 +1,120 @@
+{
+  "status": "reviewed",
+  "reviewed_by": "Kautilya",
+  "generated_by": "openai/gpt-oss-120b (rules-v1, 2026-10-07T07:48:29+00:00)",
+  "source_docs": [
+    {
+      "title": "ESOP Policy",
+      "file": "data/docs/esop_policy.pdf",
+      "sha256": "8389e32d9f3bdf7b8780277092a0d1bf69b110a499ccbb0f97018c7e37b2ffc6"
+    },
+    {
+      "title": "Board Resolution: ESOP Pool",
+      "file": "data/docs/board_resolution_esop_pool.pdf",
+      "sha256": "1d6095faf7eda1eae363a2b1827316f46c6d06239ae6bdeceb3369c2662767cf"
+    }
+  ],
+  "rules": [
+    {
+      "field": "options",
+      "op": "max",
+      "doc_title": "ESOP Policy",
+      "page": 2,
+      "clause": "3.1",
+      "source_text": "The total number of Options outstanding and exercised under this Plan may never exceed the Pool.",
+      "id": "R1",
+      "value": "$pool_remaining"
+    },
+    {
+      "field": "grant_date",
+      "op": "min",
+      "doc_title": "Board Resolution: ESOP Pool",
+      "page": 1,
+      "clause": "RESOLVED FURTHER THAT the Board shall administer the Plan",
+      "source_text": "no grant shall be made under the Plan before the date of this resolution.",
+      "id": "R2",
+      "value": "$board_resolution_date"
+    },
+    {
+      "field": "cliff_months",
+      "op": "equals",
+      "doc_title": "ESOP Policy",
+      "page": 3,
+      "clause": "4.2",
+      "source_text": "Every grant is subject to a Cliff of twelve (12) months.",
+      "id": "R3",
+      "value": 12
+    },
+    {
+      "field": "vesting_frequency",
+      "op": "equals",
+      "doc_title": "ESOP Policy",
+      "page": 3,
+      "clause": "4.3",
+      "source_text": "After the Cliff, the remaining Options vest in thirty-six (36) equal monthly instalments",
+      "id": "R4",
+      "value": "monthly"
+    },
+    {
+      "field": "strike_price",
+      "op": "min",
+      "doc_title": "ESOP Policy",
+      "page": 4,
+      "clause": "5.1",
+      "source_text": "The Exercise Price shall not be less than Rs 10 per Share",
+      "id": "R5",
+      "value": 10.0
+    },
+    {
+      "field": "exercise_window_days",
+      "op": "equals",
+      "doc_title": "ESOP Policy",
+      "page": 5,
+      "clause": "6.1",
+      "source_text": "An Employee who leaves the Company as a Good Leaver may exercise their Vested Options within ninety (90) days after the Last Working Day.",
+      "id": "R6",
+      "value": 90
+    },
+    {
+      "field": "leaver_terms.unvested_lapse_on_leaving",
+      "op": "equals",
+      "doc_title": "ESOP Policy",
+      "page": 6,
+      "clause": "7.1",
+      "source_text": "When an Employee's employment ends for any reason, all Unvested Options lapse on the Last Working Day and return to the Pool.",
+      "id": "R7",
+      "value": true
+    },
+    {
+      "field": "leaver_terms.bad_leaver_forfeits_vested",
+      "op": "equals",
+      "doc_title": "ESOP Policy",
+      "page": 6,
+      "clause": "7.4",
+      "source_text": "A Bad Leaver forfeits all Vested Options and all Unvested Options with immediate effect on the date of termination",
+      "id": "R8",
+      "value": true
+    },
+    {
+      "field": "acceleration_on_acquisition",
+      "op": "equals",
+      "doc_title": "ESOP Policy",
+      "page": 7,
+      "clause": "8.2",
+      "source_text": "On a Change of Control, fifty per cent (50%) of each Employee's Unvested Options vest immediately before the Change of Control is completed.",
+      "id": "R9",
+      "value": 50.0
+    },
+    {
+      "field": "total_months",
+      "op": "equals",
+      "doc_title": "ESOP Policy",
+      "page": 3,
+      "clause": "4.1",
+      "source_text": "every grant vests over a total period of forty-eight (48) months from the Grant Date",
+      "id": "R10",
+      "value": 48
+    }
+  ],
+  "rejected_proposals": []
+}

@@ -44,7 +44,7 @@ flowchart TD
     API -->|audit record| DB
 ```
 
-The API sets identity and writes the audit log. The LLM only chooses which tool to call and writes the answer. The tools are the only components that read cap table data.
+The API sets identity and writes the audit log. The LLM only chooses which tool to call and writes the answer. On the chat path, the tools are the only components that read cap table data. (The admin-only compliance check reads the pool size through the same repo; see [Grant compliance checker](#grant-compliance-checker).)
 
 **One request** (*"If I leave next month…"* as Priya):
 
@@ -68,6 +68,35 @@ The API sets identity and writes the audit log. The LLM only chooses which tool 
 | Heading-aware chunks sized to the embedding model | Chunks split on clause headings, never span two pages (so a citation is exactly one page), and fit `all-MiniLM-L6-v2`'s 256-token window. |
 | Identity only from a header | Request bodies have no identity fields (unknown fields are ignored). For the demo the header is trusted; in production it becomes a verified JWT and only one function changes. |
 
+## Grant compliance checker
+
+An admin uploads a draft grant letter (`POST /compliance/check`, or the **Review grant letter** tab), and Vestwise flags every term that contradicts the ESOP policy or the cap table, citing both documents. **The LLM reads; code decides.**
+
+```text
+letter PDF ─▶ extract terms (LLM, structured output, page + quote per field)
+          ─▶ ground (code: each quote must be on the page the model named)
+          ─▶ compare field by field against reviewed policy rules + cap table (code, no LLM)
+          ─▶ report (LLM rephrases each finding; code validates it and adds status, citations, pool source)
+```
+
+- **Four outcomes per field, computed in code:** `match`, `conflict`, `missing` (the letter is silent), `not_covered` (no policy rule), plus `exceeds_pool` when the grant is larger than the unallocated ESOP pool. The same letter always gets the same findings.
+- **Rules are human-reviewed before they can decide anything.** One LLM pass over the policy and board resolution proposes `data/policy_rules.json`; a person checks every rule against its page; `scripts/build_policy_rules.py --load` refuses a file that isn't marked reviewed. **The review caught 5 of 9 proposed rules citing the wrong page** (each one page too high, from clause 5.1 on). All quotes, fields and values were right, but every report would have cited the wrong page.
+- **Data checks use the same rule engine.** `options ≤ $pool_remaining` (989,950, from the cap table) and `grant_date ≥ $board_resolution_date` (15 Nov 2024) are rules whose values are filled in at check time.
+- **The report can only rephrase.** One line per finding id; the validator rejects missing, extra or repeated findings, numbers not in the finding, and any pool line that attributes the pool figure to the policy. Status labels, both citations and "(unallocated pool, from the cap table)" are added by code. On any failure the report falls back to a plain template.
+- **Every check is audit-logged** (`kind: compliance_check`, findings, rule ids, file hash, LLM calls).
+
+**Result on the three test letters** (`python scripts/check_letters.py`):
+
+| Letter | Planted issues | Findings |
+| --- | --- | --- |
+| Ananya (clean) | none | 10/10 match |
+| Vikram | 6-month cliff, 30-day exercise window | 2 conflicts, e.g. *cliff is 6 months [Draft Grant Letter: Vikram Nair, p. 1] but the policy requires 12 months [ESOP Policy, p. 3, clause 4.2]* |
+| Neha | no exercise window, 1,200,000 options | 1 missing, 1 exceeds pool (989,950 left) |
+
+**Precision 1.00, recall 1.00** over the 4 planted issues: all 4 flagged with citations to both the letter and the policy, nothing else flagged. Each LLM report passed validation on the first try.
+
+**The demo makes 0 LLM calls.** Every live output (extractions, reports, the rules proposal) is cached in `data/compliance_cache/`, keyed on the PDF's SHA-256 and the prompt version. Re-checking the test letters through the API takes about 150 ms. A new or edited letter costs two calls: one extraction, one report.
+
 ## Evaluation
 
 All numbers below were measured on the synthetic company in `data/`, with `as_of` fixed per question.
@@ -77,7 +106,8 @@ All numbers below were measured on the synthetic company in `data/`, with `as_of
 | Retrieval hit@5 | **10/11** (91%; target ≥ 90%) | `scripts/eval_retrieval.py`: each policy and mixed golden question used as the query, as its own user; the expected page must be in the top 5. The one miss is explained below. |
 | Isolation | **0 leaks** | Every golden question retrieved as Priya at k=5 and k=50 returns no chunk of Rahul's letter; the same probe as admin does return it (positive control). Plus 43 API access tests (401/403 matrix, spoofed identity in body). |
 | Agent demo set | **10/10** in a single run (Groq `openai/gpt-oss-120b`) | `scripts/try_agent.py`: 3 success-criteria questions, the Rahul probes, dilution, the acquisition question and 3 not-in-documents questions, each with automatic checks. First-draft citation precision 6/6 in that run. |
-| Unit and integration tests | **325 passed** | `pytest`; no test calls the LLM or the database (fakes plus a network tripwire). |
+| Grant compliance checker | **Precision 1.00, recall 1.00** (4 planted issues, 3 letters) | `scripts/check_letters.py`; a planted issue counts only with the expected status and citations to both documents. See [Grant compliance checker](#grant-compliance-checker). |
+| Unit and integration tests | **388 passed** | `pytest`; no test calls the LLM or the database (fakes plus a network tripwire; the compliance integration tests replay recorded extractions). |
 | Full golden-set eval (20 questions through the agent) | _pending_ | `scripts/eval.py`; see the note below. |
 
 **Full golden-set eval: pending.** `scripts/eval.py` runs all 20 golden questions through the real agent and reports retrieval hit@5, number accuracy, refusal accuracy, citation rate, first-draft citation precision, retry rate, and latency with and without rate-limit waits. One full run uses ~110–135k tokens, and Groq's free tier allows 200k tokens per day for this model, so the two runs needed for a variance measurement are scheduled on separate days. Results will be added here with the run files in `eval/`.
@@ -91,6 +121,7 @@ All numbers below were measured on the synthetic company in `data/`, with `as_of
 - **Vesting model gaps.** Bad-leaver forfeiture, acceleration on acquisition, unpaid-leave suspension and the 10-year expiry are stated in the policy (and answered from it, with citations), but not modelled in the vesting calculation.
 - **Simulated login.** The UI's user switcher sets `X-User-Id`; anyone who can reach the UI can pick the admin. Both servers bind to localhost only.
 - **Synthetic data, one company.** The data model is multi-tenant (`company_id` everywhere), but the demo has one company and four documents.
+- **Compliance scores come from a small test set.** Precision and recall are over 4 planted issues in 3 synthetic letters with a clean table layout; messier real letters would need more test cases. The rules cover 10 fields; anything else in a letter isn't checked.
 
 ## Setup and run
 
@@ -107,7 +138,9 @@ python scripts/seed.py                  # company, users, stakeholders, holdings
 python scripts/ingest_all.py            # chunk + embed the PDFs into Atlas
 python scripts/create_vector_index.py   # Atlas Vector Search index (waits until READY)
 
-python -m pytest -q                     # 325 tests, no network
+python scripts/build_policy_rules.py --load   # load the reviewed compliance rules
+
+python -m pytest -q                     # 388 tests, no network
 bash scripts/run_all.sh                 # API on :8000/docs, UI on :8501; Ctrl+C stops both
 ```
 
@@ -119,6 +152,8 @@ Demo users: `u_priya` and `u_rahul` (employees), `u_arjun` (admin). Other script
 | `scripts/try_agent.py` | 10 agent cases with pass/fail checks |
 | `scripts/eval_retrieval.py` | Retrieval hit@5, score distribution, access assertion (no LLM) |
 | `scripts/eval.py` | Full golden-set evaluation through the agent; `--compare` for run-to-run variance |
+| `scripts/build_policy_rules.py` | Propose compliance rules with one LLM pass (cached); `--load` loads the reviewed file |
+| `scripts/check_letters.py` | Check the 3 test letters and print precision/recall; `--plan` shows how many live LLM calls a run would make |
 
 ## Project layout
 
@@ -132,7 +167,10 @@ app/
   ingest/                    PDF loader, heading-aware chunker, embedder, pipeline
   rag/                       access filter, retriever, system prompt
   tools/                     vesting, cap table/dilution (pure), repo, per-request tool factory
+  compliance/                grant letter schema, extraction + grounding, rule engine, report validation, cache
 ui/                          Streamlit app and its HTTP client
+data/policy_rules.json       human-reviewed compliance rules
+data/compliance_cache/       recorded LLM outputs (extractions, reports, rules proposal)
 scripts/                     data build, seed, ingest, index, demos, evals
 eval/golden.jsonl            20 golden questions
 tests/                       pytest suite
@@ -140,7 +178,7 @@ tests/                       pytest suite
 
 ## What's next
 
-- **Grant compliance checker:** an admin uploads a draft grant letter, and the system flags every term that contradicts the policy or the cap table, citing both. The LLM extracts the terms; code decides each verdict.
+- **Ground policy rules in code:** check each proposed rule's quote against the PDF and correct its page automatically, as letter extraction already does; that would have caught all 5 wrong pages before review.
 - **Entailment check for citations:** an LLM judge (or an NLI model) that verifies each cited sentence is supported by the cited page, not just that the page was retrieved.
 - **Hybrid search:** BM25 plus vectors with reciprocal rank fusion, for exact terms like clause numbers and "good leaver" that embeddings blur.
 - **Real auth:** OIDC login with a verified JWT in place of the `X-User-Id` header.

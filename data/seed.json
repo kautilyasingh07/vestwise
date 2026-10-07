@@ -3,7 +3,8 @@
     "_id": "nimbus",
     "name": "Nimbus Robotics Pvt Ltd",
     "total_authorized_shares": 15000000,
-    "esop_pool_size": 1000000
+    "esop_pool_size": 1000000,
+    "esop_board_resolution_date": "2024-11-15"
   },
   "users": [
     {"_id": "u_arjun", "company_id": "nimbus", "name": "Arjun Mehta", "role": "admin", "stakeholder_id": "sh_arjun"},

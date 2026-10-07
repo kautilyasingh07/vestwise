@@ -1,4 +1,4 @@
-"""FastAPI app (spec §9): chat, vesting, cap table, documents, audit.
+"""FastAPI app (spec §9): chat, vesting, cap table, documents, compliance check, audit.
 
 Identity flows one way: X-User-Id header -> `get_ctx` -> RequestContext ->
 endpoint -> tools. Nothing about identity is read from a request body; the
@@ -26,7 +26,10 @@ from fastapi import Depends, FastAPI, Form, Header, HTTPException, Query, Respon
 from pypdf.errors import PdfReadError
 
 from app.agent import run_agent
-from app.audit import MAX_LIMIT, classify, read_audit, write_audit
+from app.audit import MAX_LIMIT, classify, read_audit, write_audit, write_compliance_audit
+from app.compliance.pipeline import CheckResult, check_letter
+from app.compliance.rules import get_rules
+from app.compliance.schema import PolicyRule
 from app.config import settings
 from app.context import RequestContext, UnknownUserError, load_context
 from app.ingest.loader import pdf_title
@@ -36,13 +39,14 @@ from app.schemas import (
     CapTableResponse,
     ChatRequest,
     ChatResponse,
+    ComplianceResponse,
     DilutionResponse,
     DocumentResponse,
     SimulateRequest,
     VestingResponse,
 )
 from app.tools import repo as mongo_repo
-from app.tools.captable import cap_table, simulate_dilution
+from app.tools.captable import cap_table, pool_status, simulate_dilution
 from app.tools.vesting import compute_vesting
 
 logger = logging.getLogger("vestwise")
@@ -65,6 +69,9 @@ AgentFn = Callable[..., dict[str, Any]]
 AuditWriter = Callable[..., str]
 AuditReader = Callable[[str, int], list[dict[str, Any]]]
 Ingester = Callable[..., IngestResult]
+RulesLoader = Callable[[str], list[PolicyRule]]
+Checker = Callable[..., CheckResult]
+ComplianceAuditWriter = Callable[..., str]
 
 
 def get_user_loader() -> UserLoader:
@@ -95,6 +102,21 @@ def get_repo() -> Any:
 def get_ingester() -> Ingester:
     """The Phase 3 ingestion pipeline."""
     return ingest_file
+
+
+def get_rules_loader() -> RulesLoader:
+    """Reviewed policy rules of a company (Mongo `policy_rules`)."""
+    return get_rules
+
+
+def get_compliance_checker() -> Checker:
+    """The Phase 9 compliance pipeline (cached LLM extraction + code verdicts + validated report)."""
+    return check_letter
+
+
+def get_compliance_audit_writer() -> ComplianceAuditWriter:
+    """Writes one audit record per compliance check."""
+    return write_compliance_audit
 
 
 def get_ctx(
@@ -218,6 +240,16 @@ def safe_filename(name: str | None) -> str:
     return base if base.lower().endswith(".pdf") else f"{base}.pdf"
 
 
+def read_pdf_upload(file: UploadFile) -> bytes:
+    """The uploaded bytes, or 413 (over MAX_UPLOAD_BYTES) / 415 (no PDF magic bytes)."""
+    data = file.file.read(MAX_UPLOAD_BYTES + 1)
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, f"PDF larger than {MAX_UPLOAD_BYTES // 2**20} MB")
+    if not data.startswith(b"%PDF-"):
+        raise HTTPException(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, "Upload must be a PDF")
+    return data
+
+
 def check_document_owner(doc_type: DocType, owner: str | None, company_id: str, repo: Any) -> None:
     """Grant letters need an owner from this company; company-wide documents must not have one."""
     if doc_type in PERSONAL_DOC_TYPES:
@@ -247,11 +279,7 @@ def upload_document(
     """
     owner = owner_stakeholder_id or None  # an empty form field means "no owner"
     check_document_owner(doc_type, owner, ctx.company_id, repo)
-    data = file.file.read(MAX_UPLOAD_BYTES + 1)
-    if len(data) > MAX_UPLOAD_BYTES:
-        raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, f"PDF larger than {MAX_UPLOAD_BYTES // 2**20} MB")
-    if not data.startswith(b"%PDF-"):
-        raise HTTPException(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, "Upload must be a PDF")
+    data = read_pdf_upload(file)
 
     with TemporaryDirectory() as tmp:
         path = Path(tmp) / safe_filename(file.filename)
@@ -263,6 +291,74 @@ def upload_document(
     return DocumentResponse(doc_id=result.doc_id, chunks_created=result.chunks, title=result.title,
                             pages=result.pages, owner_stakeholder_id=result.owner_stakeholder_id,
                             replaced_chunks=result.replaced_chunks)
+
+
+# --- /compliance ---
+
+NO_RULES = ("No reviewed policy rules are loaded for your company. Review data/policy_rules.json, "
+            "then run: python scripts/build_policy_rules.py --load")
+COMPLIANCE_ERROR = "The compliance check failed. The error has been logged."
+
+
+@app.post("/compliance/check", response_model=ComplianceResponse, tags=["admin"])
+def compliance_check(
+    file: UploadFile,
+    response: Response,
+    ctx: AdminCtx,
+    repo: Any = Depends(get_repo),
+    load_rules: RulesLoader = Depends(get_rules_loader),
+    checker: Checker = Depends(get_compliance_checker),
+    audit: ComplianceAuditWriter = Depends(get_compliance_audit_writer),
+) -> ComplianceResponse:
+    """Check a draft grant letter against the reviewed policy rules and the cap table (admin only).
+
+    The LLM extracts the letter's terms and phrases the report; every verdict is computed in
+    code. Each check is audit-logged (outcome compliant | issues_found | error); the record id
+    is in the `X-Audit-Id` header. The letter itself is not stored or ingested.
+    """
+    start = time.monotonic()
+    data = read_pdf_upload(file)
+    file_name = safe_filename(file.filename)
+    rules = load_rules(ctx.company_id)
+    if not rules:
+        raise HTTPException(status.HTTP_409_CONFLICT, NO_RULES)
+
+    try:
+        pool = pool_status(repo.get_grants(ctx.company_id), repo.get_pool_size(ctx.company_id))["unallocated"]
+        board_date = repo.get_board_resolution_date(ctx.company_id)
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / file_name
+            path.write_bytes(data)
+            result = checker(path, rules, pool, board_date)
+    except Exception as exc:  # noqa: BLE001 - log it, audit it, return a clean 500
+        logger.exception("compliance check failed for user %s", ctx.user_id)
+        error = f"{type(exc).__name__}: {exc}"[:MAX_ERROR_CHARS]
+        try:
+            audit(ctx, file_name, elapsed_ms(start), outcome="error", error=error)
+        except Exception:  # noqa: BLE001 - the original error is what the client needs to hear about
+            logger.exception("audit write failed after a compliance error")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, COMPLIANCE_ERROR) from None
+
+    latency = elapsed_ms(start)
+    flags = (["report_template_fallback"] if result.report.source == "template" else []) + \
+            (["extraction_warnings"] if result.warnings else [])
+    details = {"file_hash": result.file_hash, "letter_title": result.letter_title, "counts": result.counts,
+               "findings": [{"id": f.id, "field": f.field, "status": f.status, "rule_ids": f.rule_ids}
+                            for f in result.findings],
+               "report_source": result.report.source, "report_problems": result.report.problems,
+               "warnings": result.warnings, "llm_calls": result.llm_calls, "cached": result.cached,
+               "pool_remaining": pool, "board_resolution_date": board_date.isoformat()}
+    try:
+        audit_id = audit(ctx, file_name, latency, outcome=result.outcome, summary=result.summary(),
+                         details=details, flags=flags)
+    except Exception:  # noqa: BLE001 - fail closed, as /chat
+        logger.exception("audit write failed for user %s", ctx.user_id)
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, COMPLIANCE_ERROR) from None
+    response.headers["X-Audit-Id"] = audit_id
+    return ComplianceResponse(letter_title=result.letter_title, file_hash=result.file_hash, outcome=result.outcome,
+                              summary=result.summary(), counts=result.counts, findings=result.findings,
+                              report=result.report, warnings=result.warnings, llm_calls=result.llm_calls,
+                              cached=result.cached, latency_ms=latency)
 
 
 # --- /audit ---

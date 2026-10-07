@@ -15,7 +15,7 @@ from typing import Any
 from fastapi.testclient import TestClient
 
 from app import main
-from app.audit import build_record
+from app.audit import build_compliance_record, build_record
 from app.context import RequestContext, UnknownUserError
 from app.ingest.pipeline import IngestResult
 
@@ -71,6 +71,10 @@ class FakeRepo:
         self.calls.append(("get_stakeholder_names", (company_id,)))
         return {s["_id"]: s["name"] for s in SEED["stakeholders"] if s["company_id"] == company_id}
 
+    def get_board_resolution_date(self, company_id: str) -> date:
+        self.calls.append(("get_board_resolution_date", (company_id,)))
+        return date.fromisoformat(SEED["company"]["esop_board_resolution_date"])
+
 
 @dataclass
 class FakeAgent:
@@ -114,6 +118,14 @@ class FakeAudit:
         self.records.append(record)
         return record["id"]
 
+    def write_compliance(self, ctx: RequestContext, file_name: str, latency_ms: int, **kwargs: Any) -> str:
+        if self.fail:
+            raise ConnectionError("audit store down")
+        record = build_compliance_record(ctx, file_name, latency_ms, **kwargs)
+        record["id"] = f"audit_{len(self.records) + 1}"
+        self.records.append(record)
+        return record["id"]
+
     def read(self, company_id: str, limit: int) -> list[dict[str, Any]]:
         mine = [r for r in self.records if r["company_id"] == company_id]
         return list(reversed(mine))[:limit]
@@ -137,6 +149,26 @@ class FakeIngester:
 
 
 @dataclass
+class FakeCompliance:
+    """Rules store and checker for /compliance/check: records calls; returns `result` or raises `error`."""
+
+    rules: list[Any] = field(default_factory=list)
+    result: Any = None
+    error: Exception | None = None
+    calls: list[dict[str, Any]] = field(default_factory=list)
+
+    def load_rules(self, company_id: str) -> list[Any]:
+        return self.rules if company_id == SEED["company"]["_id"] else []
+
+    def check(self, path: Path, rules: list[Any], pool_remaining: int, board_resolution_date: date) -> Any:
+        self.calls.append({"filename": path.name, "bytes": path.read_bytes(), "rules": rules,
+                           "pool_remaining": pool_remaining, "board_resolution_date": board_resolution_date})
+        if self.error is not None:
+            raise self.error
+        return self.result
+
+
+@dataclass
 class Api:
     """A TestClient wired to fakes, plus handles to inspect them."""
 
@@ -145,6 +177,7 @@ class Api:
     audit: FakeAudit
     repo: FakeRepo
     ingester: FakeIngester
+    compliance: FakeCompliance = field(default_factory=FakeCompliance)
 
     def as_user(self, user_id: str | None) -> dict[str, str]:
         """Headers for a request as this user (no header if None)."""
@@ -161,6 +194,9 @@ def make_api() -> Iterator[Api]:
         main.get_audit_reader: lambda: api.audit.read,
         main.get_repo: lambda: api.repo,
         main.get_ingester: lambda: api.ingester,
+        main.get_rules_loader: lambda: api.compliance.load_rules,
+        main.get_compliance_checker: lambda: api.compliance.check,
+        main.get_compliance_audit_writer: lambda: api.audit.write_compliance,
     })
     try:
         yield api

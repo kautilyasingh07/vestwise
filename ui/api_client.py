@@ -13,6 +13,7 @@ from typing import Any
 import requests
 
 TIMEOUT_SECONDS = 60  # free-tier LLMs are throttled; Phase 5/6 saw single answers take ~45 s
+COMPLIANCE_TIMEOUT_SECONDS = 120
 AUDIT_LIMIT = 20
 
 
@@ -61,13 +62,15 @@ def call(
     *,
     json: dict[str, Any] | None = None,
     params: dict[str, Any] | None = None,
+    files: dict[str, tuple[str, bytes, str]] | None = None,
     timeout: float = TIMEOUT_SECONDS,
 ) -> ApiResult:
     """Send one request as `user_id` (X-User-Id header); never raises."""
     url = base_url.rstrip("/") + path
+    extra = {"files": files} if files is not None else {}
     try:
         response = requests.request(method, url, headers={"X-User-Id": user_id}, json=json, params=params,
-                                    timeout=timeout)
+                                    timeout=timeout, **extra)
     except requests.Timeout:
         return ApiResult(ok=False, error=f"No answer within {timeout:.0f} s. Free-tier models are sometimes "
                                          "throttled; please try again in a moment.")
@@ -102,6 +105,12 @@ def simulate(base_url: str, user_id: str, new_shares: int, investor_name: str) -
     """POST /captable/simulate (admin only)."""
     return call(base_url, "POST", "/captable/simulate", user_id,
                 json={"new_shares": new_shares, "investor_name": investor_name})
+
+
+def compliance_check(base_url: str, user_id: str, file_name: str, data: bytes) -> ApiResult:
+    """POST /compliance/check with the PDF as multipart (admin only). Up to two LLM calls, hence the longer timeout."""
+    return call(base_url, "POST", "/compliance/check", user_id,
+                files={"file": (file_name, data, "application/pdf")}, timeout=COMPLIANCE_TIMEOUT_SECONDS)
 
 
 def audit(base_url: str, user_id: str, limit: int = AUDIT_LIMIT) -> ApiResult:
