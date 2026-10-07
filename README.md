@@ -2,6 +2,10 @@
 
 Vestwise answers employees' and admins' questions about stock options. **Every number comes from a tested function, every policy claim cites a page, and every user sees only their own data.**
 
+> **Stack:** Python 3.12 · FastAPI · LangChain tool calling · MongoDB Atlas Vector Search · sentence-transformers · Groq `gpt-oss-120b` (or Gemini) · Streamlit · MCP
+>
+> **Results:** **0 leaks** across the access tests · retrieval **hit@5 10/11** · grant compliance checker **precision 1.00 / recall 1.00** · **445 tests** passing
+
 ## The problem
 
 Employees ask HR the same questions about their stock options: *How many have I vested? What happens if I resign? How long do I have to exercise?* The answers live in two places: policy PDFs (rules) and the cap table (numbers). A general-purpose chatbot is the wrong tool for both:
@@ -97,7 +101,7 @@ letter PDF ─▶ extract terms (LLM, structured output, page + quote per field)
 
 **Precision 1.00, recall 1.00** over the 4 planted issues: all 4 flagged with citations to both the letter and the policy, nothing else flagged. Each LLM report passed validation on the first try.
 
-**The demo makes 0 LLM calls.** Every live output (extractions, reports, the rules proposal) is cached in `data/compliance_cache/`, keyed on the PDF's SHA-256 and the prompt version. Re-checking the test letters through the API takes about 150 ms. A new or edited letter costs two calls: one extraction, one report.
+**Re-checking the test letters makes 0 LLM calls.** Every live output (extractions, reports, the rules proposal) is cached in `data/compliance_cache/`, keyed on the PDF's SHA-256 and the prompt version, so a re-check through the API takes about 150 ms. A new or edited letter costs two calls: one extraction, one report.
 
 ## Evaluation
 
@@ -108,14 +112,14 @@ All numbers below were measured on the synthetic company in `data/`, with `as_of
 | Retrieval hit@5 | **10/11** (91%; target ≥ 90%), vector and hybrid alike | `scripts/eval_retrieval.py [--mode vector\|hybrid]`: each policy and mixed golden question used as the query, as its own user; the expected page must be in the top 5. The one miss is explained below. |
 | Isolation | **0 leaks** | Every golden question retrieved as Priya at k=5 and k=50 returns no chunk of Rahul's letter, in both modes; the same probe as admin does return it (positive control). BM25 separately: Priya's per-request keyword corpus holds 0 of Rahul's chunks, and 3 keyword probes aimed at his letter plus all 20 golden questions never rank one. Plus 43 API access tests (401/403 matrix, spoofed identity in body) and the MCP server tests. |
 | Follow-up question | **Pass** (1 live run, 4 model calls) | `scripts/try_followup.py` as Priya: "How many options have I vested?" (2,100), then "And in March next year?" → `get_vesting_status(as_of="2027-03-03")` → 2,600, matching the tool. |
-| Agent demo set | **10/10** in a single run (Groq `openai/gpt-oss-120b`) | `scripts/try_agent.py`: 3 success-criteria questions, the Rahul probes, dilution, the acquisition question and 3 not-in-documents questions, each with automatic checks. First-draft citation precision 6/6 in that run. |
+| Agent demo set | **10/10** in a single run (Groq `openai/gpt-oss-120b`) | `scripts/try_agent.py`: 3 success-criteria questions, the Rahul probes, dilution, the acquisition question and 3 not-in-documents questions, each with automatic checks. First-draft citation precision 6/6 in that run. Measured before the system prompt's follow-up rule (re-call tools for a new date) was added; the full golden-set eval below runs on the final code. |
 | Grant compliance checker | **Precision 1.00, recall 1.00** (4 planted issues, 3 letters) | `scripts/check_letters.py`; a planted issue counts only with the expected status and citations to both documents. See [Grant compliance checker](#grant-compliance-checker). |
 | Unit and integration tests | **445 passed** | `pytest`; no test calls the LLM or the database (fakes plus a network tripwire; the compliance integration tests replay recorded extractions). |
-| Full golden-set eval (20 questions through the agent) | _pending_ | `scripts/eval.py`; see the note below. |
+| Full golden-set eval (20 questions through the agent) | _pending_ (runs on the final code, including the follow-up rule) | `scripts/eval.py`; see the note below. |
 
 **Full golden-set eval: pending.** `scripts/eval.py` runs all 20 golden questions through the real agent and reports retrieval hit@5, number accuracy, refusal accuracy, citation rate, first-draft citation precision, retry rate, and latency with and without rate-limit waits. One full run uses ~110–135k tokens, and Groq's free tier allows 200k tokens per day for this model, so the two runs needed for a variance measurement are scheduled on separate days. Results will be added here with the run files in `eval/`.
 
-**The one retrieval miss (G07).** "What happens to my options if *Nimbus* gets acquired?" retrieves the acquisition clause (policy p. 7) only at rank 11 with vectors: the company name pulls the query toward the preamble chunks. Hybrid search does **not** fix it (rank 6, still a miss; details below). Through the agent it is fixed end to end by query rewriting: the `search_policy` docstring tells the model to use the policy's vocabulary and drop the company name. The queries the model actually wrote in Phase 5 ("change of control acquisition", "exercise options acquisition change of control") put p. 7 at **rank 1** in both modes at the 0.35 threshold, and the agent cites p. 7 with the 50% acceleration.
+**The one retrieval miss (G07).** "What happens to my options if *Nimbus* gets acquired?" retrieves the acquisition clause (policy p. 7) only at rank 11 with vectors: the company name pulls the query toward the preamble chunks. Hybrid search does **not** fix it (rank 6, still a miss; details below). Through the agent it is fixed end to end by query rewriting: the `search_policy` docstring tells the model to use the policy's vocabulary and drop the company name. The queries the agent actually wrote ("change of control acquisition", "exercise options acquisition change of control") put p. 7 at **rank 1** in both modes at the 0.35 threshold, and the agent cites p. 7 with the 50% acceleration.
 
 ### Hybrid search: measured, not adopted
 
