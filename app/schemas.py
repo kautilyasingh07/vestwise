@@ -173,17 +173,17 @@ class DocumentResponse(BaseModel):
 # --- /audit ---
 
 class AuditRecord(BaseModel):
-    """One audit_logs entry (FR-18): a chat turn or a compliance check (FR-25)."""
+    """One audit_logs entry (FR-18): a chat turn, a compliance check (FR-25) or an MCP tool call (FR-20)."""
 
     id: str
-    kind: str = "chat"  # "chat" | "compliance_check"; chat records written before Phase 9 have no kind
+    kind: str = "chat"  # "chat" | "compliance_check" | "mcp"; chat records written before Phase 9 have no kind
     ts: datetime
     user_id: str
     role: str
     stakeholder_id: str | None
     question: str
     as_of: date | None
-    model: str
+    model: str | None  # None for MCP tool calls: the LLM belongs to the MCP client
     chunk_ids: list[str]
     tool_calls: list[ToolCall]
     answer: str | None

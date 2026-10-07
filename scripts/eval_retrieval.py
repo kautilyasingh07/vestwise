@@ -1,6 +1,7 @@
 """Retrieval eval on the golden set (spec §12): hit@5, score distribution, access check.
 
-Run from the repo root:  python scripts/eval_retrieval.py
+Run from the repo root:  python scripts/eval_retrieval.py [--mode vector|hybrid]
+(default: settings.retrieval_mode). No LLM calls.
 
 1. hit@5 for policy and mixed questions: the expected (doc, page) is among the
    top 5 chunks retrieved as the question's own user. Each miss prints its top 5.
@@ -11,12 +12,15 @@ Run from the repo root:  python scripts/eval_retrieval.py
    chunk owned by Rahul (at k=5 and at k=50, i.e. every chunk she can see).
    A positive control checks the admin *does* get Rahul's letter for the probe,
    so the assertion is not passing vacuously.
+4. BM25 access (hybrid): Priya's BM25 corpus holds no Rahul chunk, and BM25
+   queries aimed at Rahul's letter return none of his chunks; admin control.
 
 Retrieval for (1) and (2) runs with no threshold, so the scores are raw; the
 sweep then shows what each threshold would do. Exit code 1 if the access
 assertion fails or hit@5 is below target.
 """
 
+import argparse
 import json
 import math
 import statistics
@@ -31,8 +35,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app import db  # noqa: E402
 from app.config import settings  # noqa: E402
-from app.rag.access import Role  # noqa: E402
-from app.rag.retriever import RetrievedChunk, retrieve  # noqa: E402
+from app.rag.access import Role, build_access_filter  # noqa: E402
+from app.rag.hybrid import bm25_ranking  # noqa: E402
+from app.rag.retriever import FUSION_DEPTH, RetrievalMode, RetrievedChunk, bm25_text, load_corpus, retrieve  # noqa: E402
 
 GOLDEN_PATH = Path(__file__).resolve().parent.parent / "eval" / "golden.jsonl"
 K = 5
@@ -51,6 +56,10 @@ TARGET_RATE = 18 / 20
 
 PRIYA_USER, RAHUL_STAKEHOLDER, ADMIN_USER = "u_priya", "sh_rahul", "u_arjun"
 PROBE_ID = "G20"  # policy-style question aimed at Rahul's letter
+# Keyword queries aimed at Rahul's letter (his name, his numbers) for the BM25 access check.
+RAHUL_PROBES = ["Rahul Verma grant letter", "Rahul Verma vesting schedule cliff 15 March 2027",
+                "grant letter Rahul options granted exercise price"]
+MODE: RetrievalMode = settings.retrieval_mode  # set from --mode in main()
 SWEEP = [0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45]
 
 # Clearly off-topic queries (not in the golden set): what the threshold is for.
@@ -100,9 +109,11 @@ def load_contexts() -> dict[str, UserContext]:
     }
 
 
-def search(question: str, ctx: UserContext, k: int = K) -> list[RetrievedChunk]:
-    """Retrieve as this user with no score threshold."""
-    return retrieve(question, ctx.company_id, ctx.role, ctx.stakeholder_id, k=k, min_score=NO_THRESHOLD)
+def search(question: str, ctx: UserContext, k: int = K, min_score: float = NO_THRESHOLD,
+           mode: RetrievalMode | None = None) -> list[RetrievedChunk]:
+    """Retrieve as this user (default: no score threshold, the --mode in use)."""
+    return retrieve(question, ctx.company_id, ctx.role, ctx.stakeholder_id, k=k, min_score=min_score,
+                    mode=mode or MODE)
 
 
 def hit_rank(chunks: list[RetrievedChunk], doc_title: str, page: int) -> int | None:
@@ -113,9 +124,26 @@ def hit_rank(chunks: list[RetrievedChunk], doc_title: str, page: int) -> int | N
     return None
 
 
+def gate_score(question: str, ctx: UserContext) -> float:
+    """The cosine the not-found gate compares with min_score: the vector top-1's.
+
+    Taken from a separate vector-only k=1 search: in hybrid mode the vector #1
+    can fall out of the fused top 5, so the fused list can't be used for this.
+    """
+    chunks = search(question, ctx, k=1, mode="vector")
+    return chunks[0].score if chunks else NO_THRESHOLD
+
+
+def fmt_ranks(c: RetrievedChunk) -> str:
+    """"v3 b1" = vector rank 3, BM25 rank 1 ("-" = not in that list); empty in vector mode."""
+    if c.rrf_score is None:
+        return ""
+    return f"v{c.vector_rank or '-'} b{c.bm25_rank or '-'}  "
+
+
 def fmt_chunk(c: RetrievedChunk) -> str:
-    """One line: score, document, page, section."""
-    return f"{c.score:.3f}  {c.doc_title} p.{c.page}  {c.section[:45]}"
+    """One line: score, ranks (hybrid), document, page, section."""
+    return f"{c.score:.3f}  {fmt_ranks(c)}{c.doc_title} p.{c.page}  {c.section[:45]}"
 
 
 def describe(values: list[float]) -> str:
@@ -127,31 +155,37 @@ def describe(values: list[float]) -> str:
             f"  [{', '.join(f'{v:.3f}' for v in vals)}]")
 
 
-def eval_hits(golden: list[dict[str, Any]], contexts: dict[str, UserContext]) -> tuple[int, int, list[float], list[float]]:
+def eval_hits(golden: list[dict[str, Any]], contexts: dict[str, UserContext]
+              ) -> tuple[int, int, int, list[float], list[float]]:
     """Print hit@5 per retrieval question and every miss's top 5.
 
-    Returns (hits, total, expected-chunk scores of hits, top-1 scores of misses).
+    Also measures hit@5 on the production path (configured min_score applied,
+    which in hybrid mode drops vector hits *before* fusion and so can reorder).
+    Returns (hits, production-path hits, total, expected-chunk scores of hits, gate scores of misses).
     """
     print(f"== hit@{K} (policy + mixed, retrieved as the question's user, no threshold) ==")
-    hits, total = 0, 0
+    hits, prod_hits, total = 0, 0, 0
     hit_scores: list[float] = []
     miss_top1: list[float] = []
     for row in (r for r in golden if r["type"] in RETRIEVAL_TYPES):
         total += 1
         chunks = search(row["question"], contexts[row["user_id"]])
         rank = hit_rank(chunks, row["expected_doc"], row["expected_page"])
+        prod = search(row["question"], contexts[row["user_id"]], min_score=settings.retrieval_min_score)
+        prod_hits += hit_rank(prod, row["expected_doc"], row["expected_page"]) is not None
         target = f"{row['expected_doc']} p.{row['expected_page']}"
         if rank is not None:
             hits += 1
             hit_scores.append(chunks[rank - 1].score)
-            print(f"  HIT   {row['id']} {row['type']:<6} rank {rank}  {chunks[rank - 1].score:.3f}  {target}")
+            print(f"  HIT   {row['id']} {row['type']:<6} rank {rank}  {chunks[rank - 1].score:.3f}  "
+                  f"{fmt_ranks(chunks[rank - 1])}{target}")
         else:
-            miss_top1.append(chunks[0].score if chunks else NO_THRESHOLD)
+            miss_top1.append(gate_score(row["question"], contexts[row["user_id"]]))
             print(f"  MISS  {row['id']} {row['type']:<6} expected {target}: {row['question']}")
             for c in chunks:
                 print(f"          {fmt_chunk(c)}")
     print(f"\nhit@{K}: {hits}/{total}")
-    return hits, total, hit_scores, miss_top1
+    return hits, prod_hits, total, hit_scores, miss_top1
 
 
 def top1_scores(golden: list[dict[str, Any]], contexts: dict[str, UserContext], types: tuple[str, ...]) -> dict[str, tuple[float, str]]:
@@ -160,8 +194,8 @@ def top1_scores(golden: list[dict[str, Any]], contexts: dict[str, UserContext], 
     for row in (r for r in golden if r["type"] in types):
         chunks = search(row["question"], contexts[row["user_id"]])
         top = chunks[0] if chunks else None
-        out[row["id"]] = (top.score if top else NO_THRESHOLD, fmt_chunk(top) if top else "(nothing)")
-        print(f"  {row['id']} {row['type']:<9} top-1 {out[row['id']][1]}  | {row['question']}")
+        out[row["id"]] = (gate_score(row["question"], contexts[row["user_id"]]), fmt_chunk(top) if top else "(nothing)")
+        print(f"  {row['id']} {row['type']:<9} gate {out[row['id']][0]:.3f}  top-1 {out[row['id']][1]}  | {row['question']}")
     return out
 
 
@@ -169,8 +203,7 @@ def off_topic_top1(ctx: UserContext) -> list[float]:
     """Top-1 cosine for each OFF_TOPIC query."""
     scores = []
     for q in OFF_TOPIC:
-        chunks = search(q, ctx, k=1)
-        scores.append(chunks[0].score if chunks else NO_THRESHOLD)
+        scores.append(gate_score(q, ctx))
     return scores
 
 
@@ -215,17 +248,51 @@ def check_access(golden: list[dict[str, Any]], contexts: dict[str, UserContext])
     return not violations and control
 
 
+def check_bm25_access(golden: list[dict[str, Any]], contexts: dict[str, UserContext]) -> bool:
+    """BM25 on its own: Priya's corpus and rankings never contain Rahul's chunks; admin control."""
+    print("\n== BM25 access: Priya's per-request corpus and keyword rankings ==")
+
+    def corpus_for(ctx: UserContext) -> list[dict[str, Any]]:
+        access = build_access_filter(ctx.company_id, ctx.role, ctx.stakeholder_id)
+        return load_corpus(access, ctx.company_id, ctx.role, ctx.stakeholder_id)
+
+    priya, admin = corpus_for(contexts[PRIYA_USER]), corpus_for(contexts[ADMIN_USER])
+    owner = {d["_id"]: d.get("owner_stakeholder_id") for d in admin}
+    in_corpus = [d["_id"] for d in priya if d.get("owner_stakeholder_id") == RAHUL_STAKEHOLDER]
+    print(f"  corpus sizes: Priya {len(priya)}, admin {len(admin)}; Rahul chunks in Priya's corpus: {len(in_corpus)}")
+
+    violations: list[str] = list(in_corpus)
+    priya_docs = [(d["_id"], bm25_text(d)) for d in priya]
+    admin_docs = [(d["_id"], bm25_text(d)) for d in admin]
+    for q in RAHUL_PROBES + [r["question"] for r in golden]:
+        violations += [f"{q!r}: {cid}" for cid in bm25_ranking(q, priya_docs, FUSION_DEPTH)
+                       if owner[cid] == RAHUL_STAKEHOLDER]
+    control = all(owner[bm25_ranking(q, admin_docs, 1)[0]] == RAHUL_STAKEHOLDER for q in RAHUL_PROBES)
+    print(f"  {len(RAHUL_PROBES)} Rahul probes + {len(golden)} golden questions as Priya, top {FUSION_DEPTH} each")
+    print(f"  positive control: each Rahul probe's BM25 top-1 as admin is Rahul's letter: {control}")
+    if violations:
+        print(f"  FAIL: {violations}")
+    else:
+        print("  PASS: BM25 never ranked a Rahul chunk for Priya")
+    return not violations and control
+
+
 def main() -> int:
-    """Run all three checks and print a summary."""
+    """Run all checks and print a summary."""
+    global MODE
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--mode", choices=["vector", "hybrid"], default=settings.retrieval_mode)
+    MODE = parser.parse_args().mode
     db.ping()
     golden = load_golden(GOLDEN_PATH)
     contexts = load_contexts()
     print(f"golden set: {len(golden)} questions {dict(Counter(r['type'] for r in golden))}; "
-          f"index '{settings.vector_index_name}', configured min_score {settings.retrieval_min_score}\n")
+          f"index '{settings.vector_index_name}', configured min_score {settings.retrieval_min_score}, "
+          f"mode {MODE}\n")
 
-    hits, total, hit_scores, miss_top1 = eval_hits(golden, contexts)
+    hits, prod_hits, total, hit_scores, miss_top1 = eval_hits(golden, contexts)
 
-    print("\n== top-1 for questions the documents should not answer ==")
+    print("\n== top-1 for questions the documents should not answer (score = vector top-1 cosine, the gate) ==")
     others = top1_scores(golden, contexts, ("not_found", "access"))
     not_found_top1 = [others[r["id"]][0] for r in golden if r["type"] == "not_found"]
 
@@ -233,20 +300,21 @@ def main() -> int:
 
     print("\n== score distribution (cosine) ==")
     print(f"  hits, score of the expected chunk:  {describe(hit_scores)}")
-    print(f"  misses, top-1 score:                {describe(miss_top1)}")
-    print(f"  not_found, top-1 score:             {describe(not_found_top1)}")
-    print(f"  off-topic probes, top-1 score:      {describe(off_topic)}")
+    print(f"  misses, vector top-1 score:         {describe(miss_top1)}")
+    print(f"  not_found, vector top-1 score:      {describe(not_found_top1)}")
+    print(f"  off-topic probes, vector top-1:     {describe(off_topic)}")
     print_sweep(hit_scores, total, not_found_top1, off_topic)
 
     access_ok = check_access(golden, contexts)
+    bm25_ok = check_bm25_access(golden, contexts)
 
     target = math.ceil(TARGET_RATE * total)
-    at_threshold = sum(s >= settings.retrieval_min_score for s in hit_scores)
     print("\n== summary ==")
     print(f"  hit@{K} (no threshold):              {hits}/{total}  (target >= {target}/{total}, i.e. 18/20 rate)")
-    print(f"  hit@{K} at min_score {settings.retrieval_min_score}:          {at_threshold}/{total}")
+    print(f"  hit@{K} at min_score {settings.retrieval_min_score} (production): {prod_hits}/{total}")
     print(f"  access assertion:                   {'PASS' if access_ok else 'FAIL'}")
-    return 0 if access_ok and at_threshold >= target else 1
+    print(f"  BM25 access assertion:              {'PASS' if bm25_ok else 'FAIL'}")
+    return 0 if access_ok and bm25_ok and prod_hits >= target else 1
 
 
 if __name__ == "__main__":

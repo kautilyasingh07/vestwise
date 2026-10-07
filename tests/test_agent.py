@@ -295,3 +295,42 @@ def test_answer_tags_are_merged_and_citations_cover_each_page(use_model) -> None
     out = agent.run_agent(PRIYA, "leave?", as_of=AS_OF)
     assert out["answer"] == "Lapse [ESOP Policy, p. 5, 6]."  # merged, pages ascending
     assert [c["page"] for c in out["citations"]] == [5, 6]
+
+
+# --- follow-ups (FR-16): history reaches the model; the follow-up gets a fresh tool call ---
+
+FIRST_TURN = [{"role": "user", "content": "How many options have I vested?"},
+              {"role": "assistant", "content": "You have vested 2,100 options as of 2026-10-03."}]
+
+
+def test_history_sits_between_system_prompt_and_new_question(use_model) -> None:
+    model = use_model([AIMessage(content="ok")])
+    agent.run_agent(PRIYA, "And in March next year?", history=FIRST_TURN, as_of=AS_OF)
+    sent = model.requests[0]
+    assert [type(m).__name__ for m in sent] == ["SystemMessage", "HumanMessage", "AIMessage", "HumanMessage"]
+    assert [m.content for m in sent[1:]] == [h["content"] for h in FIRST_TURN] + ["And in March next year?"]
+
+
+def test_only_last_six_history_messages_reach_the_model(use_model) -> None:
+    history = [{"role": "user" if i % 2 == 0 else "assistant", "content": f"m{i}"} for i in range(9)]
+    model = use_model([AIMessage(content="ok")])
+    agent.run_agent(PRIYA, "now?", history=history, as_of=AS_OF)
+    assert [m.content for m in model.requests[0][1:-1]] == [f"m{i}" for i in range(3, 9)]
+
+
+def test_follow_up_date_reaches_the_vesting_tool(use_model) -> None:
+    model = use_model([
+        AIMessage(content="", tool_calls=[call("get_vesting_status", {"as_of": "2027-03-01"}, "v1")]),
+        AIMessage(content="By 1 March 2027 you will have vested 2,500 options."),
+    ])
+    out = agent.run_agent(PRIYA, "And in March next year?", history=FIRST_TURN, as_of=AS_OF)
+    assert out["tool_calls"] == [{"name": "get_vesting_status", "args": {"as_of": "2027-03-01"}}]
+    tool_result = model.requests[1][-1]
+    assert isinstance(tool_result, ToolMessage) and '"as_of": "2027-03-01"' in tool_result.content
+
+
+def test_prompt_tells_the_model_to_recompute_follow_ups() -> None:
+    from app.rag.prompts import build_system_prompt
+
+    text = build_system_prompt(PRIYA, AS_OF)
+    assert "call the tool again with the new date" in text and "never reuse" in text

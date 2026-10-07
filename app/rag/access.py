@@ -36,3 +36,17 @@ def build_access_filter(company_id: str, role: Role, stakeholder_id: str | None)
             ],
         }
     raise ValueError(f"unknown role: {role!r}")
+
+
+def is_visible(chunk: dict[str, Any], company_id: str, role: Role, stakeholder_id: str | None) -> bool:
+    """Python mirror of build_access_filter, for checking chunks already loaded into memory.
+
+    Used as a fail-closed second check on the BM25 corpus (which Mongo filtered
+    with build_access_filter): if this ever disagrees with Mongo, retrieval raises.
+    """
+    build_access_filter(company_id, role, stakeholder_id)  # same argument validation, same errors
+    if chunk.get("company_id") != company_id:
+        return False
+    if role == "admin":
+        return True
+    return chunk.get("owner_stakeholder_id") in (None, stakeholder_id)

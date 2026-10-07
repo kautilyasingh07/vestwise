@@ -20,6 +20,12 @@ sentence-transformers
 pypdf
 langchain-text-splitters
 
+# Retrieval: BM25 keyword search for hybrid retrieval (spec §8.2)
+rank_bm25
+
+# MCP server (FR-20). 2.x renamed FastMCP to MCPServer; server.py uses the 2.x API
+mcp>=2,<3
+
 # UI
 streamlit
 requests
